@@ -30,7 +30,7 @@ static DEVICE_CODES: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new
 
 #[derive(Deserialize)]
 struct SignupReq {
-    email: String,
+    username: String,
     password: String,
 }
 
@@ -41,7 +41,7 @@ struct SignupResp {
 
 #[derive(Deserialize)]
 struct LoginReq {
-    email: String,
+    username: String,
     password: String,
 }
 
@@ -128,7 +128,8 @@ async fn main() {
     sqlx::query(
         "create table if not exists users (
             id uuid primary key,
-            email text unique not null,
+            username text unique,
+            email text,
             password_hash text not null,
             created_at timestamptz default now()
         )",
@@ -136,6 +137,12 @@ async fn main() {
     .execute(&db)
     .await
     .unwrap();
+    let _ = sqlx::query("alter table users add column if not exists role text not null default 'user'")
+        .execute(&db)
+        .await;
+    let _ = sqlx::query("alter table users add column if not exists username text unique")
+        .execute(&db)
+        .await;
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
     let state = AppState {
         device_codes: &DEVICE_CODES,
@@ -166,6 +173,8 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
+        .route("/api/system/init/state", get(init_state))
+        .route("/api/system/init", post(init_system))
         .route("/api/cloud/signup", post(signup))
         .route("/api/auth/signup", post(auth_signup))
         .route("/api/auth/login", post(auth_login))
@@ -181,8 +190,8 @@ async fn main() {
 }
 
 async fn signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> impl IntoResponse {
-    let existing = sqlx::query_scalar::<_, Uuid>("select id from users where email = $1")
-        .bind(&req.email)
+    let existing = sqlx::query_scalar::<_, Uuid>("select id from users where username = $1")
+        .bind(&req.username)
         .fetch_optional(&st.db)
         .await
         .ok()
@@ -194,9 +203,9 @@ async fn signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> impl 
         let argon2 = Argon2::default();
         let hash = argon2.hash_password(req.password.as_bytes(), &salt).unwrap().to_string();
         let uid = Uuid::new_v4();
-        let _ = sqlx::query("insert into users (id, email, password_hash) values ($1, $2, $3)")
+        let _ = sqlx::query("insert into users (id, username, password_hash) values ($1, $2, $3)")
             .bind(uid)
-            .bind(&req.email)
+            .bind(&req.username)
             .bind(&hash)
             .execute(&st.db)
             .await;
@@ -244,9 +253,52 @@ async fn version() -> impl IntoResponse {
     })
 }
 
+#[derive(Serialize)]
+struct InitStateResp {
+    initialized: bool,
+}
+
+#[derive(Deserialize)]
+struct InitReq {
+    username: String,
+    password: String,
+}
+
+async fn init_state(State(st): State<AppState>) -> impl IntoResponse {
+    let cnt: i64 = sqlx::query_scalar("select count(*) from users")
+        .fetch_one(&st.db)
+        .await
+        .unwrap_or(0);
+    Json(InitStateResp { initialized: cnt > 0 })
+}
+
+async fn init_system(State(st): State<AppState>, Json(req): Json<InitReq>) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let cnt: i64 = sqlx::query_scalar("select count(*) from users")
+        .fetch_one(&st.db)
+        .await
+        .unwrap_or(0);
+    if cnt > 0 {
+        return Err((StatusCode::CONFLICT, Json(serde_json::json!({ "error": "already_initialized" }))));
+    }
+    let salt = SaltString::generate(&mut rand_core::OsRng);
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(req.password.as_bytes(), &salt).unwrap().to_string();
+    let uid = Uuid::new_v4();
+    let _ = sqlx::query("insert into users (id, username, password_hash, role) values ($1, $2, $3, 'admin')")
+        .bind(uid)
+        .bind(&req.username)
+        .bind(&hash)
+        .execute(&st.db)
+        .await;
+    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| "/srv/nas".to_string());
+    let user_root = std::path::Path::new(&base_root).join("users").join(uid.to_string());
+    let _ = std::fs::create_dir_all(&user_root);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 async fn auth_signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> impl IntoResponse {
-    let existing = sqlx::query_scalar::<_, Uuid>("select id from users where email = $1")
-        .bind(&req.email)
+    let existing = sqlx::query_scalar::<_, Uuid>("select id from users where username = $1")
+        .bind(&req.username)
         .fetch_optional(&st.db)
         .await
         .ok()
@@ -258,9 +310,9 @@ async fn auth_signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> 
         let argon2 = Argon2::default();
         let hash = argon2.hash_password(req.password.as_bytes(), &salt).unwrap().to_string();
         let uid = Uuid::new_v4();
-        let _ = sqlx::query("insert into users (id, email, password_hash) values ($1, $2, $3)")
+        let _ = sqlx::query("insert into users (id, username, password_hash) values ($1, $2, $3)")
             .bind(uid)
-            .bind(&req.email)
+            .bind(&req.username)
             .bind(&hash)
             .execute(&st.db)
             .await;
@@ -274,12 +326,12 @@ async fn auth_signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> 
 }
 
 async fn auth_login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> Result<Json<LoginResp>, (StatusCode, Json<serde_json::Value>)> {
-    let row = sqlx::query_as::<_, (Uuid, String, String)>("select id, password_hash, email from users where email = $1")
-        .bind(&req.email)
+    let row = sqlx::query_as::<_, (Uuid, String, String)>("select id, password_hash, username from users where username = $1")
+        .bind(&req.username)
         .fetch_optional(&st.db)
         .await
         .unwrap();
-    if let Some((uid, pwd_hash, _email)) = row {
+    if let Some((uid, pwd_hash, _username)) = row {
         let parsed = PasswordHash::new(&pwd_hash).unwrap();
         let ok = Argon2::default()
             .verify_password(req.password.as_bytes(), &parsed)
@@ -330,13 +382,13 @@ async fn require_auth(State(st): State<AppState>, mut req: Request, next: Next) 
 }
 
 async fn whoami(State(st): State<AppState>, Extension(user): Extension<AuthUser>) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let rec = sqlx::query_scalar::<_, String>("select email from users where id = $1")
+    let rec = sqlx::query_scalar::<_, String>("select username from users where id = $1")
         .bind(user.user_id)
         .fetch_optional(&st.db)
         .await
         .unwrap();
-    if let Some(email) = rec {
-        Ok(Json(serde_json::json!({ "user_id": user.user_id.to_string(), "email": email })))
+    if let Some(username) = rec {
+        Ok(Json(serde_json::json!({ "user_id": user.user_id.to_string(), "username": username })))
     } else {
         Err((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "not_found" }))))
     }
