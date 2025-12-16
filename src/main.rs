@@ -28,6 +28,7 @@ struct AppState {
 }
 
 static DEVICE_CODES: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static START_TIME: Lazy<chrono::DateTime<Utc>> = Lazy::new(|| Utc::now());
 
 #[derive(Deserialize)]
 struct SignupReq {
@@ -155,6 +156,14 @@ async fn main() {
     let _ = sqlx::query("alter table users add column if not exists username text unique")
         .execute(&db)
         .await;
+    let _ = sqlx::query(
+        "create table if not exists system_config (
+            key text primary key,
+            value text
+        )",
+    )
+    .execute(&db)
+    .await;
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
     let state = AppState {
         device_codes: &DEVICE_CODES,
@@ -190,6 +199,7 @@ async fn main() {
         .route("/version", get(version))
         .route("/api/system/init/state", get(init_state))
         .route("/api/system/init", post(init_system))
+        .route("/api/system/device", get(get_device_info))
         .route("/api/cloud/signup", post(signup))
         .route("/api/auth/signup", post(auth_signup))
         .route("/api/auth/login", post(auth_login))
@@ -289,6 +299,7 @@ struct InitStateResp {
 struct InitReq {
     username: String,
     password: String,
+    device_name: String,
 }
 
 async fn init_state(State(st): State<AppState>) -> impl IntoResponse {
@@ -317,10 +328,66 @@ async fn init_system(State(st): State<AppState>, Json(req): Json<InitReq>) -> Re
         .bind(&hash)
         .execute(&st.db)
         .await;
+
+    // Generate device ID (40 chars hex)
+    let mut bytes = [0u8; 20];
+    for i in 0..20 {
+        bytes[i] = fastrand::u8(..);
+    }
+    let device_id = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+    let _ = sqlx::query("insert into system_config (key, value) values ('device_name', $1) on conflict (key) do update set value = $1")
+        .bind(&req.device_name)
+        .execute(&st.db)
+        .await;
+    let _ = sqlx::query("insert into system_config (key, value) values ('device_id', $1) on conflict (key) do update set value = $1")
+        .bind(&device_id)
+        .execute(&st.db)
+        .await;
+
     let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| "/srv/nas".to_string());
     let user_root = std::path::Path::new(&base_root).join("users").join(uid.to_string());
     let _ = std::fs::create_dir_all(&user_root);
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Serialize)]
+struct DeviceInfoResp {
+    device_name: String,
+    device_id: String,
+    system_version: String,
+    system_time: String,
+    uptime: String,
+}
+
+async fn get_device_info(State(st): State<AppState>) -> impl IntoResponse {
+    let name: String = sqlx::query_scalar("select value from system_config where key = 'device_name'")
+        .fetch_optional(&st.db)
+        .await
+        .unwrap_or(None)
+        .unwrap_or_else(|| "PNAS-Server".to_string());
+    let id: String = sqlx::query_scalar("select value from system_config where key = 'device_id'")
+        .fetch_optional(&st.db)
+        .await
+        .unwrap_or(None)
+        .unwrap_or_else(|| "Unknown".to_string());
+    
+    let now = Utc::now();
+    let uptime_duration = now.signed_duration_since(*START_TIME);
+    let days = uptime_duration.num_days();
+    let hours = uptime_duration.num_hours() % 24;
+    let minutes = uptime_duration.num_minutes() % 60;
+    
+    let uptime_str = format!("{}天 {}小时 {}分", days, hours, minutes);
+    let time_str = now.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string();
+
+    Json(DeviceInfoResp {
+        device_name: name,
+        device_id: id,
+        system_version: format!("PNAS Lite {}", env!("CARGO_PKG_VERSION")),
+        system_time: time_str,
+        uptime: uptime_str,
+    })
 }
 
 async fn auth_signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> impl IntoResponse {
