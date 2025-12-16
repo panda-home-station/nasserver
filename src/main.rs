@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Extension, Request, State},
-    http::{Method, StatusCode},
+    extract::{Extension, Request, State, Multipart},
+    http::{Method, StatusCode, HeaderMap, HeaderValue},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{delete, get, post, get_service},
@@ -18,6 +18,7 @@ use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use dotenvy::dotenv;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use password_hash::SaltString;
+use axum::extract::DefaultBodyLimit;
 
 #[derive(Clone)]
 struct AppState {
@@ -101,6 +102,17 @@ struct FsDeleteQuery {
 }
 
 #[derive(Deserialize)]
+struct FsRenameReq {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
+struct FsDownloadQuery {
+    path: String,
+}
+
+#[derive(Deserialize)]
 struct FsMkdirReq {
     path: String,
 }
@@ -124,8 +136,9 @@ struct FsListResp {
 async fn main() {
     dotenv().ok();
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@postgres:5432/pnas".to_string());
-    let db = PgPoolOptions::new().max_connections(5).connect(&db_url).await.unwrap();
-    sqlx::query(
+    // Use lazy connection to avoid crashing when DB is unavailable in dev/test
+    let db = PgPoolOptions::new().max_connections(5).connect_lazy(&db_url).unwrap();
+    let _ = sqlx::query(
         "create table if not exists users (
             id uuid primary key,
             username text unique,
@@ -135,8 +148,7 @@ async fn main() {
         )",
     )
     .execute(&db)
-    .await
-    .unwrap();
+    .await;
     let _ = sqlx::query("alter table users add column if not exists role text not null default 'user'")
         .execute(&db)
         .await;
@@ -158,6 +170,9 @@ async fn main() {
         .route("/api/fs/list", get(fs_list))
         .route("/api/fs/mkdir", post(fs_mkdir))
         .route("/api/fs/delete", delete(fs_delete))
+        .route("/api/fs/rename", post(fs_rename))
+        .route("/api/fs/download", get(fs_download))
+        .route("/api/fs/upload", post(fs_upload))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "/srv/www".to_string());
@@ -183,8 +198,20 @@ async fn main() {
         .with_state(state)
         .merge(protected)
         .fallback_service(static_service)
-        .layer(cors);
-    let addr: SocketAddr = ([0, 0, 0, 0], 8000).into();
+        .layer(cors)
+        .layer({
+            let max_mb = std::env::var("PNAS_MAX_UPLOAD_MB")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(10240);
+            DefaultBodyLimit::max(max_mb * 1024 * 1024)
+        });
+    let port: u16 = std::env::var("PNAS_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(8000);
+    println!("Backend listening on port {}", port);
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
@@ -366,12 +393,32 @@ async fn require_auth(State(st): State<AppState>, mut req: Request, next: Next) 
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let token = hdr.strip_prefix("Bearer ").unwrap_or("");
+    let bearer = hdr.strip_prefix("Bearer ").unwrap_or("");
+    let mut token = bearer.to_string();
     if token.is_empty() {
+        if let Some(q) = req.uri().query() {
+            for pair in q.split('&') {
+                let mut kv = pair.splitn(2, '=');
+                if kv.next() == Some("token") {
+                    token = kv.next().unwrap_or("").to_string();
+                    break;
+                }
+            }
+        }
+    }
+    if token.is_empty() {
+        println!("Auth failed: missing token for {}", req.uri().path());
         return Err(StatusCode::UNAUTHORIZED);
     }
+    // Dev-only bypass: allow raw UUID tokens when ALLOW_INSECURE_AUTH=1
+    if std::env::var("ALLOW_INSECURE_AUTH").ok().as_deref() == Some("1") {
+        if let Ok(uid) = Uuid::parse_str(token.as_str()) {
+            req.extensions_mut().insert(AuthUser { user_id: uid });
+            return Ok(next.run(req).await);
+        }
+    }
     let data = decode::<Claims>(
-        token,
+        token.as_str(),
         &DecodingKey::from_secret(st.jwt_secret.as_bytes()),
         &Validation::default(),
     )
@@ -517,4 +564,124 @@ async fn fs_delete(Extension(user): Extension<AuthUser>, axum::extract::Query(q)
         return Json(serde_json::json!({ "ok": true }));
     }
     Json(serde_json::json!({ "ok": false }))
+}
+
+async fn fs_rename(Extension(user): Extension<AuthUser>, Json(req): Json<FsRenameReq>) -> impl IntoResponse {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
+    let base = format!("{}/users/{}", base_root, user.user_id);
+
+    let norm_from = if req.from.starts_with('/') { &req.from[1..] } else { req.from.as_str() };
+    let from_joined: PathBuf = Path::new(&base).join(norm_from);
+    let norm_to = if req.to.starts_with('/') { &req.to[1..] } else { req.to.as_str() };
+    let to_joined: PathBuf = Path::new(&base).join(norm_to);
+
+    let base_abs = fs::canonicalize(&base).unwrap_or_else(|_| PathBuf::from(&base));
+    let from_abs = match fs::canonicalize(&from_joined) {
+        Ok(p) => p,
+        Err(_) => from_joined.clone(),
+    };
+    let to_parent = to_joined.parent().unwrap_or(Path::new(&base)).to_path_buf();
+    let to_abs = match fs::canonicalize(&to_parent) {
+        Ok(p) => p.join(to_joined.file_name().unwrap_or_default()),
+        Err(_) => to_joined.clone(),
+    };
+    if !from_abs.starts_with(&base_abs) || !to_abs.starts_with(&base_abs) {
+        return Json(serde_json::json!({ "ok": false }));
+    }
+    let _ = fs::create_dir_all(to_parent);
+    let ok = fs::rename(&from_abs, &to_abs).is_ok();
+    Json(serde_json::json!({ "ok": ok }))
+}
+
+async fn fs_download(Extension(user): Extension<AuthUser>, axum::extract::Query(q): axum::extract::Query<FsDownloadQuery>) -> impl IntoResponse {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
+    let base = format!("{}/users/{}", base_root, user.user_id);
+    let req_path = q.path;
+    let norm = if req_path.starts_with('/') { &req_path[1..] } else { req_path.as_str() };
+    let joined: PathBuf = Path::new(&base).join(norm);
+
+    let base_abs = fs::canonicalize(&base).unwrap_or_else(|_| PathBuf::from(&base));
+    let target_abs = match fs::canonicalize(&joined) {
+        Ok(p) => p,
+        Err(_) => joined.clone(),
+    };
+    if !target_abs.starts_with(&base_abs) {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/octet-stream"));
+        return (headers, Vec::<u8>::new());
+    }
+    let data = fs::read(&target_abs).unwrap_or_default();
+    let name = target_abs.file_name().and_then(|n| n.to_str()).unwrap_or("download.bin");
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/octet-stream"));
+    let cd = format!("attachment; filename=\"{}\"", name);
+    if let Ok(v) = HeaderValue::from_str(&cd) {
+        headers.insert("content-disposition", v);
+    }
+    (headers, data)
+}
+
+async fn fs_upload(Extension(user): Extension<AuthUser>, mut multipart: Multipart) -> impl IntoResponse {
+    use std::path::{Path, PathBuf};
+    use tokio::fs;
+    use tokio::io::AsyncWriteExt;
+
+    let mut dest_path = "/".to_string();
+    let mut wrote = false;
+    let mut total_written: usize = 0;
+    let mut saved_name: Option<String> = None;
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "path" {
+            dest_path = field.text().await.unwrap_or("/".to_string());
+        } else if name == "file" {
+            let file_name = field.file_name().map(|s| s.to_string()).unwrap_or("upload.bin".to_string());
+            let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
+            let base = format!("{}/users/{}", base_root, user.user_id);
+            let norm = if dest_path.starts_with('/') { &dest_path[1..] } else { dest_path.as_str() };
+            let dir_joined: PathBuf = Path::new(&base).join(norm);
+            let base_abs = std::fs::canonicalize(&base).unwrap_or_else(|_| PathBuf::from(&base));
+            let dir_abs = match std::fs::canonicalize(&dir_joined) {
+                Ok(p) => p,
+                Err(_) => dir_joined.clone(),
+            };
+            if !dir_abs.starts_with(&base_abs) {
+                return Json(serde_json::json!({ "ok": false }));
+            }
+            let _ = std::fs::create_dir_all(&dir_abs);
+            let target_abs = dir_abs.join(&file_name);
+            let mut f = match fs::File::create(&target_abs).await {
+                Ok(h) => h,
+                Err(e) => {
+                    println!("fs_upload: create file failed: {}", e);
+                    return Json(serde_json::json!({ "ok": false }));
+                }
+            };
+            println!("fs_upload: user={} dest={} name={} starting", user.user_id, dest_path, file_name);
+            while let Ok(Some(chunk)) = field.chunk().await {
+                total_written += chunk.len();
+                if let Err(e) = f.write_all(&chunk).await {
+                    println!("fs_upload: write chunk failed: {}", e);
+                    return Json(serde_json::json!({ "ok": false }));
+                }
+            }
+            wrote = true;
+            saved_name = Some(file_name);
+            println!("fs_upload: finished bytes_len={}", total_written);
+        }
+    }
+
+    if !wrote {
+        println!("fs_upload: no file field received, dest={}", dest_path);
+        return Json(serde_json::json!({ "ok": false }));
+    }
+
+    Json(serde_json::json!({ "ok": true, "name": saved_name.unwrap_or_default(), "bytes": total_written }))
 }
