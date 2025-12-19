@@ -9,6 +9,7 @@ use password_hash::SaltString;
 use uuid::Uuid;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
+use std::path::Path;
 
 use crate::state::AppState;
 use crate::models::auth::{SignupReq, SignupResp, LoginReq, LoginResp, Claims, AuthUser};
@@ -34,8 +35,7 @@ pub async fn signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> i
             .execute(&st.db)
             .await;
         // create per-user storage root
-        let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| "/srv/nas".to_string());
-        let user_root = std::path::Path::new(&base_root).join("users").join(uid.to_string());
+        let user_root = Path::new(&st.storage_path).join(&req.username);
         let _ = std::fs::create_dir_all(&user_root);
         uid
     };

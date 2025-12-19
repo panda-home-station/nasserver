@@ -13,6 +13,7 @@ use state::{AppState, DEVICE_CODES};
 use std::sync::{Arc, Mutex};
 use sysinfo::{System, Disks, Networks, Components};
 
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -59,10 +60,17 @@ async fn main() {
     let components = Components::new_with_refreshed_list();
 
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
+    
+    // Read PNAS_DEV_STORAGE_PATH directly from .env file
+    let storage_path = read_env_var_from_file("PNAS_DEV_STORAGE_PATH").unwrap_or_else(|_| "./volume".to_string());
+    // Ensure the base storage directory exists
+    let _ = std::fs::create_dir_all(&storage_path);
+    
     let state = AppState {
         device_codes: &DEVICE_CODES,
         db,
         jwt_secret,
+        storage_path,
         sys: Arc::new(Mutex::new(sys)),
         disks: Arc::new(Mutex::new(disks)),
         networks: Arc::new(Mutex::new(networks)),
@@ -112,4 +120,40 @@ async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Read a specific environment variable directly from the .env file
+fn read_env_var_from_file(var_name: &str) -> Result<String, std::io::Error> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    
+    let file = File::open(".env")?;
+    let reader = BufReader::new(file);
+    
+    for line in reader.lines() {
+        let line = line?;
+        // Skip comments and empty lines
+        if line.trim_start().starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        
+        // Parse KEY=VALUE format
+        if let Some(pos) = line.find('=') {
+            let key = line[..pos].trim();
+            if key == var_name {
+                let value = line[pos + 1..].trim();
+                // Remove surrounding quotes if present
+                let value = if value.starts_with('"') && value.ends_with('"') && value.len() > 1 {
+                    &value[1..value.len() - 1]
+                } else if value.starts_with('\'') && value.ends_with('\'') && value.len() > 1 {
+                    &value[1..value.len() - 1]
+                } else {
+                    value
+                };
+                return Ok(value.to_string());
+            }
+        }
+    }
+    
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Variable {} not found in .env file", var_name)))
 }

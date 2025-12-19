@@ -13,6 +13,7 @@ pub struct AppState {
     pub device_codes: &'static Lazy<Mutex<HashMap<String, i64>>>,
     pub db: Pool<Postgres>,
     pub jwt_secret: String,
+    pub storage_path: String,
     pub sys: Arc<Mutex<System>>,
     pub disks: Arc<Mutex<Disks>>,
     pub networks: Arc<Mutex<Networks>>,

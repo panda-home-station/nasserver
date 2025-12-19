@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Multipart, Query},
+    extract::{Extension, Multipart, Query, State},
     http::HeaderValue,
     http::HeaderMap,
     response::IntoResponse,
@@ -11,12 +11,23 @@ use std::time::UNIX_EPOCH;
 use tokio::io::AsyncWriteExt;
 use tokio::fs as tokio_fs;
 
+use crate::state::AppState;
 use crate::models::auth::AuthUser;
 use crate::models::fs::{FsListQuery, FsListResp, FsEntry, FsMkdirReq, FsDeleteQuery, FsRenameReq, FsDownloadQuery};
 
-pub async fn fs_list(Extension(user): Extension<AuthUser>, Query(q): Query<FsListQuery>) -> impl IntoResponse {
-    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
-    let base = format!("{}/users/{}", base_root, user.user_id);
+pub async fn fs_list(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<FsListQuery>) -> impl IntoResponse {
+    // Get username from database
+    let username_result = sqlx::query_scalar::<_, String>("select username from users where id = $1")
+        .bind(user.user_id)
+        .fetch_one(&state.db)
+        .await;
+    
+    let username = match username_result {
+        Ok(name) => name,
+        Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
+    };
+    
+    let base = format!("{}/{}", state.storage_path, username);
     let req_path = q.path.unwrap_or_else(|| "/".to_string());
 
     let norm = if req_path.starts_with('/') {
@@ -82,9 +93,19 @@ pub async fn fs_list(Extension(user): Extension<AuthUser>, Query(q): Query<FsLis
     })
 }
 
-pub async fn fs_mkdir(Extension(user): Extension<AuthUser>, Json(req): Json<FsMkdirReq>) -> impl IntoResponse {
-    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
-    let base = format!("{}/users/{}", base_root, user.user_id);
+pub async fn fs_mkdir(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(req): Json<FsMkdirReq>) -> impl IntoResponse {
+    // Get username from database
+    let username_result = sqlx::query_scalar::<_, String>("select username from users where id = $1")
+        .bind(user.user_id)
+        .fetch_one(&state.db)
+        .await;
+    
+    let username = match username_result {
+        Ok(name) => name,
+        Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
+    };
+    
+    let base = format!("{}/{}", state.storage_path, username);
     let req_path = req.path;
     let norm = if req_path.starts_with('/') { &req_path[1..] } else { req_path.as_str() };
     let joined: PathBuf = Path::new(&base).join(norm);
@@ -102,9 +123,19 @@ pub async fn fs_mkdir(Extension(user): Extension<AuthUser>, Json(req): Json<FsMk
     Json(serde_json::json!({ "ok": true }))
 }
 
-pub async fn fs_delete(Extension(user): Extension<AuthUser>, Query(q): Query<FsDeleteQuery>) -> impl IntoResponse {
-    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
-    let base = format!("{}/users/{}", base_root, user.user_id);
+pub async fn fs_delete(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<FsDeleteQuery>) -> impl IntoResponse {
+    // Get username from database
+    let username_result = sqlx::query_scalar::<_, String>("select username from users where id = $1")
+        .bind(user.user_id)
+        .fetch_one(&state.db)
+        .await;
+    
+    let username = match username_result {
+        Ok(name) => name,
+        Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
+    };
+    
+    let base = format!("{}/{}", state.storage_path, username);
     let req_path = q.path;
     let norm = if req_path.starts_with('/') { &req_path[1..] } else { req_path.as_str() };
     let joined: PathBuf = Path::new(&base).join(norm);
@@ -129,9 +160,19 @@ pub async fn fs_delete(Extension(user): Extension<AuthUser>, Query(q): Query<FsD
     Json(serde_json::json!({ "ok": false }))
 }
 
-pub async fn fs_rename(Extension(user): Extension<AuthUser>, Json(req): Json<FsRenameReq>) -> impl IntoResponse {
-    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
-    let base = format!("{}/users/{}", base_root, user.user_id);
+pub async fn fs_rename(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(req): Json<FsRenameReq>) -> impl IntoResponse {
+    // Get username from database
+    let username_result = sqlx::query_scalar::<_, String>("select username from users where id = $1")
+        .bind(user.user_id)
+        .fetch_one(&state.db)
+        .await;
+    
+    let username = match username_result {
+        Ok(name) => name,
+        Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
+    };
+    
+    let base = format!("{}/{}", state.storage_path, username);
 
     let norm_from = if req.from.starts_with('/') { &req.from[1..] } else { req.from.as_str() };
     let from_joined: PathBuf = Path::new(&base).join(norm_from);
@@ -156,9 +197,19 @@ pub async fn fs_rename(Extension(user): Extension<AuthUser>, Json(req): Json<FsR
     Json(serde_json::json!({ "ok": ok }))
 }
 
-pub async fn fs_download(Extension(user): Extension<AuthUser>, Query(q): Query<FsDownloadQuery>) -> impl IntoResponse {
-    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
-    let base = format!("{}/users/{}", base_root, user.user_id);
+pub async fn fs_download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<FsDownloadQuery>) -> impl IntoResponse {
+    // Get username from database
+    let username_result = sqlx::query_scalar::<_, String>("select username from users where id = $1")
+        .bind(user.user_id)
+        .fetch_one(&state.db)
+        .await;
+    
+    let username = match username_result {
+        Ok(name) => name,
+        Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
+    };
+    
+    let base = format!("{}/{}", state.storage_path, username);
     let req_path = q.path;
     let norm = if req_path.starts_with('/') { &req_path[1..] } else { req_path.as_str() };
     let joined: PathBuf = Path::new(&base).join(norm);
@@ -184,11 +235,22 @@ pub async fn fs_download(Extension(user): Extension<AuthUser>, Query(q): Query<F
     (headers, data)
 }
 
-pub async fn fs_upload(Extension(user): Extension<AuthUser>, mut multipart: Multipart) -> impl IntoResponse {
+pub async fn fs_upload(State(state): State<AppState>, Extension(user): Extension<AuthUser>, mut multipart: Multipart) -> impl IntoResponse {
     let mut dest_path = "/".to_string();
     let mut wrote = false;
     let mut total_written: usize = 0;
     let mut saved_name: Option<String> = None;
+
+    // Get username from database
+    let username_result = sqlx::query_scalar::<_, String>("select username from users where id = $1")
+        .bind(user.user_id)
+        .fetch_one(&state.db)
+        .await;
+    
+    let username = match username_result {
+        Ok(name) => name,
+        Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
+    };
 
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
@@ -196,8 +258,7 @@ pub async fn fs_upload(Extension(user): Extension<AuthUser>, mut multipart: Mult
             dest_path = field.text().await.unwrap_or("/".to_string());
         } else if name == "file" {
             let file_name = field.file_name().map(|s| s.to_string()).unwrap_or("upload.bin".to_string());
-            let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| ".".to_string());
-            let base = format!("{}/users/{}", base_root, user.user_id);
+            let base = format!("{}/{}", state.storage_path, username);
             let norm = if dest_path.starts_with('/') { &dest_path[1..] } else { dest_path.as_str() };
             let dir_joined: PathBuf = Path::new(&base).join(norm);
             let base_abs = std::fs::canonicalize(&base).unwrap_or_else(|_| PathBuf::from(&base));
