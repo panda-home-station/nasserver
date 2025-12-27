@@ -5,6 +5,9 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use axum::body::Body;
+use axum::response::Response;
+use tokio_util::io::ReaderStream;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -197,7 +200,7 @@ pub async fn fs_rename(State(state): State<AppState>, Extension(user): Extension
     Json(serde_json::json!({ "ok": ok }))
 }
 
-pub async fn fs_download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<FsDownloadQuery>) -> impl IntoResponse {
+pub async fn fs_download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<FsDownloadQuery>) -> Response {
     // Get username from database
     let username_result = sqlx::query_scalar::<_, String>("select username from users where id = $1")
         .bind(user.user_id)
@@ -220,19 +223,38 @@ pub async fn fs_download(State(state): State<AppState>, Extension(user): Extensi
         Err(_) => joined.clone(),
     };
     if !target_abs.starts_with(&base_abs) {
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", HeaderValue::from_static("application/octet-stream"));
-        return (headers, Vec::<u8>::new());
+        return Response::builder()
+            .status(403)
+            .body(Body::empty())
+            .unwrap();
     }
-    let data = fs::read(&target_abs).unwrap_or_default();
+    
+    let file = match tokio_fs::File::open(&target_abs).await {
+        Ok(f) => f,
+        Err(_) => {
+            return Response::builder()
+                .status(404)
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+    
+    let file_size = match file.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(_) => 0,
+    };
+    
     let name = target_abs.file_name().and_then(|n| n.to_str()).unwrap_or("download.bin");
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", HeaderValue::from_static("application/octet-stream"));
-    let cd = format!("attachment; filename=\"{}\"", name);
-    if let Ok(v) = HeaderValue::from_str(&cd) {
-        headers.insert("content-disposition", v);
-    }
-    (headers, data)
+    let stream = ReaderStream::with_capacity(file, 8192 * 16);
+    let body = Body::from_stream(stream);
+    
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/octet-stream")
+        .header("content-disposition", format!("attachment; filename=\"{}\"", name))
+        .header("content-length", file_size.to_string())
+        .body(body)
+        .unwrap()
 }
 
 pub async fn fs_upload(State(state): State<AppState>, Extension(user): Extension<AuthUser>, mut multipart: Multipart) -> impl IntoResponse {
