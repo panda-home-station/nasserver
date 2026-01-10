@@ -9,7 +9,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use axum::extract::DefaultBodyLimit;
 
 use crate::state::AppState;
-use crate::handlers::{auth, system, device, fs};
+use crate::handlers::{auth, system, device, fs, docker};
 use crate::middleware::require_auth;
 
 pub fn app(state: AppState) -> Router {
@@ -26,6 +26,14 @@ pub fn app(state: AppState) -> Router {
         .route("/api/fs/rename", post(fs::fs_rename))
         .route("/api/fs/download", get(fs::fs_download))
         .route("/api/fs/upload", post(fs::fs_upload))
+        // Docker management
+        .route("/api/docker/containers", get(docker::list_containers))
+        .route("/api/docker/images", get(docker::list_images))
+        .route("/api/docker/container/start", post(docker::start_container))
+        .route("/api/docker/container/stop", post(docker::stop_container))
+        .route("/api/docker/container/restart", post(docker::restart_container))
+        .route("/api/docker/container/remove", post(docker::remove_container))
+        .route("/api/docker/image/pull", post(docker::pull_image))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
