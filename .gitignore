@@ -1,7 +1,11 @@
+# cargo
+target
+
 # SQLite database
 *.db
 *.db-journal
 *.db-wal
 
 # Development data
-/devdata/
+devdata
+volume
