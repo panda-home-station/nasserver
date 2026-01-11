@@ -1,3 +1,7 @@
-target
-.env
-volume
+# SQLite database
+*.db
+*.db-journal
+*.db-wal
+
+# Development data
+/devdata/

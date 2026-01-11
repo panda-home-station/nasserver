@@ -8,7 +8,6 @@ use chrono::Utc;
 use password_hash::{SaltString, PasswordHasher};
 use argon2::Argon2;
 use uuid::Uuid;
-use sysinfo::{System, Disks, Networks, Components};
 use local_ip_address::local_ip;
 
 use crate::state::{AppState, START_TIME};
@@ -53,23 +52,28 @@ pub async fn init_state(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn init_system(State(st): State<AppState>, Json(req): Json<InitReq>) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let cnt: i64 = sqlx::query_scalar("select count(*) from users")
+    let user_count: i64 = sqlx::query_scalar("select count(*) from users")
         .fetch_one(&st.db)
         .await
-        .unwrap_or(0);
-    if cnt > 0 {
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+        })?;
+    if user_count > 0 {
         return Err((StatusCode::CONFLICT, Json(serde_json::json!({ "error": "already_initialized" }))));
     }
     let salt = SaltString::generate(&mut rand_core::OsRng);
     let argon2 = Argon2::default();
     let hash = argon2.hash_password(req.password.as_bytes(), &salt).unwrap().to_string();
     let uid = Uuid::new_v4();
-    let _ = sqlx::query("insert into users (id, username, password_hash, role) values ($1, $2, $3, 'admin')")
+    sqlx::query("insert into users (id, username, password_hash, role) values ($1, $2, $3, 'admin')")
         .bind(uid)
         .bind(&req.username)
         .bind(&hash)
         .execute(&st.db)
-        .await;
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+        })?;
 
     // Generate device ID (40 chars hex)
     let mut bytes = [0u8; 20];
@@ -78,14 +82,20 @@ pub async fn init_system(State(st): State<AppState>, Json(req): Json<InitReq>) -
     }
     let device_id = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
-    let _ = sqlx::query("insert into system_config (key, value) values ('device_name', $1) on conflict (key) do update set value = $1")
+    sqlx::query("insert or replace into system_config (key, value) values ('device_name', $1)")
         .bind(&req.device_name)
         .execute(&st.db)
-        .await;
-    let _ = sqlx::query("insert into system_config (key, value) values ('device_id', $1) on conflict (key) do update set value = $1")
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+        })?;
+    sqlx::query("insert or replace into system_config (key, value) values ('device_id', $1)")
         .bind(&device_id)
         .execute(&st.db)
-        .await;
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+        })?;
 
     let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| "/srv/nas".to_string());
     let user_root = std::path::Path::new(&base_root).join("users").join(uid.to_string());
@@ -185,7 +195,7 @@ pub async fn get_device_info(State(st): State<AppState>) -> impl IntoResponse {
     let mut total_rx = 0;
     let mut total_tx = 0;
     
-    for (name, data) in networks.iter() {
+    for (_name, data) in networks.iter() {
         total_rx += data.total_received();
         total_tx += data.total_transmitted();
     }

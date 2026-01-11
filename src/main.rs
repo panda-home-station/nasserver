@@ -1,5 +1,5 @@
 use dotenvy::dotenv;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use std::net::SocketAddr;
 
 mod state;
@@ -17,37 +17,91 @@ use sysinfo::{System, Disks, Networks, Components};
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@postgres:5432/pnas".to_string());
+
+    // Read PNAS_DEV_STORAGE_PATH from env or .env file
+    let storage_path = std::env::var("PNAS_DEV_STORAGE_PATH")
+        .or_else(|_| read_env_var_from_file("PNAS_DEV_STORAGE_PATH"))
+        .unwrap_or_else(|_| "./volume".to_string());
+    // Ensure the base storage directory exists
+    let _ = std::fs::create_dir_all(&storage_path);
+
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        format!("sqlite:{}/pnas.db", storage_path)
+    });
     
-    // Use lazy connection to avoid crashing when DB is unavailable in dev/test
-    let db = PgPoolOptions::new().max_connections(5).connect_lazy(&db_url).unwrap();
+    // Try to connect to database directly for better error handling
+    let db = match SqlitePoolOptions::new().max_connections(1).connect(&db_url).await {
+        Ok(pool) => {
+            println!("Database connected successfully: {}", db_url);
+            pool
+        },
+        Err(e) => {
+            eprintln!("Failed to connect to database: {}. Error: {}", db_url, e);
+            std::process::exit(1);
+        }
+    };
     
     // Init DB schema
-    let _ = sqlx::query(
+    println!("Initializing database schema...");
+    sqlx::query(
         "create table if not exists users (
-            id uuid primary key,
+            id text primary key,
             username text unique,
             email text,
             password_hash text not null,
-            created_at timestamptz default now()
-        )",
+                created_at timestamp default CURRENT_TIMESTAMP
+            )",
     )
     .execute(&db)
-    .await;
-    let _ = sqlx::query("alter table users add column if not exists role text not null default 'user'")
-        .execute(&db)
-        .await;
-    let _ = sqlx::query("alter table users add column if not exists username text unique")
-        .execute(&db)
-        .await;
-    let _ = sqlx::query(
+    .await
+    .expect("Failed to create users table");
+    println!("Users table created/verified");
+
+    // Check if 'role' column exists before attempting to add it
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'role'")
+        .fetch_one(&db)
+        .await
+        .expect("Failed to query pragma_table_info for users table");
+
+    if row.0 == 0 {
+        sqlx::query("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+            .execute(&db)
+            .await
+            .expect("Failed to alter users table to add role column");
+        println!("Users role column added");
+    } else {
+        println!("Users role column already exists");
+    }
+
+    sqlx::query(
         "create table if not exists system_config (
             key text primary key,
             value text
         )",
     )
     .execute(&db)
-    .await;
+    .await
+    .expect("Failed to create system_config table");
+    println!("System config table created/verified");
+    
+    // Create file_tasks table for task management
+    println!("Creating file_tasks table...");
+    sqlx::query(
+        "create table if not exists file_tasks (
+            id text primary key,
+            type text not null,
+            name text not null,
+            dir text,
+            progress integer default 0,
+            status text not null,
+            created_at timestamp default CURRENT_TIMESTAMP,
+            updated_at timestamp default CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create file_tasks table");
+    println!("File tasks table created/verified");
 
     // Initialize system info components
     // We use System::new() to avoid loading all processes which is slow
@@ -60,11 +114,6 @@ async fn main() {
     let components = Components::new_with_refreshed_list();
 
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
-    
-    // Read PNAS_DEV_STORAGE_PATH directly from .env file
-    let storage_path = read_env_var_from_file("PNAS_DEV_STORAGE_PATH").unwrap_or_else(|_| "./volume".to_string());
-    // Ensure the base storage directory exists
-    let _ = std::fs::create_dir_all(&storage_path);
     
     let state = AppState {
         device_codes: &DEVICE_CODES,

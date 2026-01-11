@@ -34,6 +34,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/docker/container/restart", post(docker::restart_container))
         .route("/api/docker/container/remove", post(docker::remove_container))
         .route("/api/docker/image/pull", post(docker::pull_image))
+        .route("/api/tasks", get(crate::handlers::task::list_tasks))
+        .route("/api/tasks", post(crate::handlers::task::create_task))
+        .route("/api/tasks/:id", post(crate::handlers::task::update_task))
+        .route("/api/tasks/clear", post(crate::handlers::task::clear_completed_tasks))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 

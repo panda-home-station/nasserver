@@ -9,7 +9,7 @@ pub struct DeviceCodeResp {
 #[derive(Deserialize)]
 pub struct DeviceAuthReq {
     pub code: String,
-    pub device_id: String,
+    pub _device_id: String,
 }
 
 #[derive(Serialize)]

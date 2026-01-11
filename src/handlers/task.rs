@@ -38,7 +38,7 @@ pub async fn create_task(State(state): State<AppState>, Json(payload): Json<Crea
 
 pub async fn update_task(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<UpdateTaskReq>) -> impl IntoResponse {
     if let Some(p) = payload.progress {
-         let _ = sqlx::query("update file_tasks set progress = $1, updated_at = now() where id = $2")
+         let _ = sqlx::query("update file_tasks set progress = $1, updated_at = datetime('now') where id = $2")
             .bind(p)
             .bind(&id)
             .execute(&state.db)
@@ -46,7 +46,7 @@ pub async fn update_task(State(state): State<AppState>, Path(id): Path<String>, 
     }
     
     if let Some(s) = &payload.status {
-         let _ = sqlx::query("update file_tasks set status = $1, updated_at = now() where id = $2")
+         let _ = sqlx::query("update file_tasks set status = $1, updated_at = datetime('now') where id = $2")
             .bind(s)
             .bind(&id)
             .execute(&state.db)
