@@ -12,7 +12,7 @@ use crate::state::AppState;
 use crate::handlers::{auth, system, device, fs, docker};
 use crate::middleware::require_auth;
 
-pub fn app(state: AppState) -> Router {
+pub fn api_app(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_origin(Any)
@@ -41,17 +41,6 @@ pub fn app(state: AppState) -> Router {
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
-    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "/srv/www".to_string());
-    let static_service = get_service(
-        ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{}/index.html", static_dir))),
-    )
-    .handle_error(|err| async move {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("static serve error: {}", err),
-        )
-    });
-
     Router::new()
         .route("/health", get(system::health))
         .route("/version", get(system::version))
@@ -69,7 +58,6 @@ pub fn app(state: AppState) -> Router {
         .route("/api/cloud/device/authorize", post(device::device_authorize))
         .with_state(state)
         .merge(protected)
-        .fallback_service(static_service)
         .layer(cors)
         .layer({
             let max_mb = std::env::var("PNAS_MAX_UPLOAD_MB")
@@ -78,4 +66,19 @@ pub fn app(state: AppState) -> Router {
                 .unwrap_or(10240);
             DefaultBodyLimit::max(max_mb * 1024 * 1024)
         })
+}
+
+pub fn static_app() -> Router {
+    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "/srv/www".to_string());
+    let static_service = get_service(
+        ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{}/index.html", static_dir))),
+    )
+    .handle_error(|err| async move {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("static serve error: {}", err),
+        )
+    });
+
+    Router::new().fallback_service(static_service)
 }

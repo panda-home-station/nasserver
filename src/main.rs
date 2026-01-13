@@ -126,7 +126,7 @@ async fn main() {
         components: Arc::new(Mutex::new(components)),
     };
 
-    let app = routes::app(state.clone());
+    let api = routes::api_app(state.clone());
 
     // Spawn background task to refresh system info
     let state_clone = state.clone();
@@ -168,7 +168,19 @@ async fn main() {
     println!("Backend listening on port {}", port);
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let static_port: u16 = std::env::var("PNAS_STATIC_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(6000);
+    println!("Static listening on port {}", static_port);
+    let static_addr: SocketAddr = ([0, 0, 0, 0], static_port).into();
+    let static_listener = tokio::net::TcpListener::bind(static_addr).await.unwrap();
+    let static_app = routes::static_app();
+    let s = axum::serve(static_listener, static_app);
+    tokio::spawn(async move {
+        let _ = s.await;
+    });
+    axum::serve(listener, api).await.unwrap();
 }
 
 /// Read a specific environment variable directly from the .env file
