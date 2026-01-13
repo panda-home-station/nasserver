@@ -64,10 +64,11 @@ publish:oras:
     - job: package:sysext
   rules:
     - if: '$CI_COMMIT_TAG'
-    - when: manual
+      when: manual
   script:
     - if [ -f /run/secrets/harbor/username ]; then export HARBOR_USERNAME="$(cat /run/secrets/harbor/username)"; fi
     - if [ -f /run/secrets/harbor/password ]; then export HARBOR_PASSWORD="$(cat /run/secrets/harbor/password)"; fi
-    - if [ -z "${HARBOR_USERNAME:-}" ] || [ -z "${HARBOR_PASSWORD:-}" ]; then echo "Harbor credentials missing: ensure Secret 'harbor' is mounted or set CI variables HARBOR_USERNAME/HARBOR_PASSWORD"; exit 1; fi
+    - "if [ -z \"${HARBOR_USERNAME:-}\" ]; then echo 'Harbor username missing: mount Secret harbor with key username at /run/secrets/harbor'; exit 1; fi"
+    - "if [ -z \"${HARBOR_PASSWORD:-}\" ]; then echo 'Harbor password missing: mount Secret harbor with key password at /run/secrets/harbor'; exit 1; fi"
     - echo "${HARBOR_PASSWORD}" | oras login "${HARBOR_REGISTRY}" -u "${HARBOR_USERNAME}" --password-stdin
     - oras push "${HARBOR_REGISTRY}/${HARBOR_REPO}:v${VERSION}" --artifact-type "${ORAS_ARTIFACT_TYPE}" "${ARTIFACT_RAW}:${ORAS_BLOB_TYPE}" --annotation org.opencontainers.image.title="${SYSEXT_ID}-v${VERSION}.raw" --annotation org.opencontainers.image.version="${VERSION}"
