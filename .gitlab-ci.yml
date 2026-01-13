@@ -9,9 +9,8 @@ variables:
   SYSEXT_ID: "pnas-server"
   OS_ID: "fedora"
   OS_VERSION_ID: "40"
-  VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
   ARTIFACT_BIN: "target/${SERVER_TARGET}/release/pnas-server"
-  ARTIFACT_RAW: "dist/pnas-server-v${VERSION}.raw"
+  ARTIFACT_RAW: "dist/pnas-server.raw"
   ORAS_ARTIFACT_TYPE: "application/vnd.pnas.sysext"
   ORAS_BLOB_TYPE: "application/vnd.pnas.sysext.raw"
   HARBOR_REGISTRY: "harbor.pandamicro.com"
@@ -70,5 +69,7 @@ publish:oras:
     - export HARBOR_PASSWORD="${harbor_password:-${HARBOR_PASSWORD:-}}"
     - "if [ -z \"${HARBOR_USERNAME:-}\" ]; then echo 'Harbor username missing: set CI variable harbor_username'; exit 1; fi"
     - "if [ -z \"${HARBOR_PASSWORD:-}\" ]; then echo 'Harbor password missing: set CI variable harbor_password'; exit 1; fi"
+    - VERSION="${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+    - echo "Publish version: ${VERSION}"
     - echo "${HARBOR_PASSWORD}" | oras login "${HARBOR_REGISTRY}" -u "${HARBOR_USERNAME}" --password-stdin --plain-http
     - oras push "${HARBOR_REGISTRY}/${HARBOR_REPO}:v${VERSION}" --artifact-type "${ORAS_ARTIFACT_TYPE}" "${ARTIFACT_RAW}:${ORAS_BLOB_TYPE}" --annotation org.opencontainers.image.title="${SYSEXT_ID}-v${VERSION}.raw" --annotation org.opencontainers.image.version="${VERSION}" --plain-http
