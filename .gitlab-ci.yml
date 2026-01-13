@@ -65,6 +65,21 @@ publish:oras:
   rules:
     - if: '$CI_COMMIT_TAG'
     - when: manual
+  variables:
+    KUBERNETES_POD_TEMPLATE: |
+      apiVersion: v1
+      kind: Pod
+      spec:
+        containers:
+        - name: build
+          volumeMounts:
+          - name: harbor-secret
+            mountPath: /run/secrets/harbor
+            readOnly: true
+        volumes:
+        - name: harbor-secret
+          secret:
+            secretName: harbor
   script:
     - if [ -f /run/secrets/harbor/username ]; then export HARBOR_USERNAME="$(cat /run/secrets/harbor/username)"; fi
     - if [ -f /run/secrets/harbor/password ]; then export HARBOR_PASSWORD="$(cat /run/secrets/harbor/password)"; fi
