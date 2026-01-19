@@ -12,6 +12,7 @@ use state::{AppState, DEVICE_CODES};
 
 use std::sync::{Arc, Mutex};
 use sysinfo::{System, Disks, Networks, Components};
+use sqlx::Row;
 
 
 #[tokio::main]
@@ -192,6 +193,38 @@ async fn main() {
             }
         }
     });
+
+    // Spawn background task to purge trash older than 30 days
+    {
+        let db = state.db.clone();
+        let storage_root = state.storage_path.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(24 * 3600)).await;
+                let rows = sqlx::query("select id, storage, checksum from cloud_files where dir like '/Trash%' and updated_at < datetime('now', '-30 day')")
+                    .fetch_all(&db)
+                    .await
+                    .unwrap_or_default();
+                for row in rows {
+                    let id: String = row.try_get("id").unwrap_or_default();
+                    let storage: String = row.try_get("storage").unwrap_or_default();
+                    let checksum: String = row.try_get("checksum").unwrap_or_default();
+                    let _ = sqlx::query("delete from cloud_files where id = $1").bind(&id).execute(&db).await;
+                    if storage == "blob" && !checksum.is_empty() {
+                        let cnt: i64 = sqlx::query_scalar("select count(*) from cloud_files where checksum = $1")
+                            .bind(&checksum)
+                            .fetch_one(&db)
+                            .await
+                            .unwrap_or(1);
+                        if cnt == 0 {
+                            let blobs_root = std::path::Path::new(&storage_root).join("vol1").join("blobs");
+                            let _ = std::fs::remove_file(blobs_root.join(&checksum));
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     let port: u16 = std::env::var("PNAS_PORT")
         .ok()

@@ -260,7 +260,7 @@ pub async fn rename(State(state): State<AppState>, Extension(user): Extension<Au
 
 pub async fn delete(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<DocsDeleteQuery>) -> impl IntoResponse {
     let rec = if let Some(id) = &q.id {
-        sqlx::query("select storage, checksum from cloud_files where id = $1 and user_id = $2")
+        sqlx::query("select name, dir, storage, checksum from cloud_files where id = $1 and user_id = $2")
             .bind(id)
             .bind(user.user_id.to_string())
             .fetch_one(&state.db)
@@ -273,7 +273,7 @@ pub async fn delete(State(state): State<AppState>, Extension(user): Extension<Au
             if pp.is_empty() { "/".to_string() } else { if pp.starts_with('/') { pp } else { format!("/{}", pp) } }
         };
         let name = Path::new(&np).file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
-        sqlx::query("select storage, checksum from cloud_files where user_id = $1 and dir = $2 and name = $3")
+        sqlx::query("select name, dir, storage, checksum from cloud_files where user_id = $1 and dir = $2 and name = $3")
             .bind(user.user_id.to_string())
             .bind(&parent)
             .bind(&name)
@@ -285,37 +285,36 @@ pub async fn delete(State(state): State<AppState>, Extension(user): Extension<Au
     if let Ok(row) = rec {
         let storage: String = row.try_get("storage").unwrap_or_default();
         let checksum: String = row.try_get("checksum").unwrap_or_default();
-        if let Some(id) = &q.id {
-            let _ = sqlx::query("delete from cloud_files where id = $1 and user_id = $2")
-                .bind(id)
+        let name: String = row.try_get("name").unwrap_or_default();
+        let dir_cur: String = row.try_get("dir").unwrap_or("/".to_string());
+        let dir_cur = if dir_cur.is_empty() { "/".to_string() } else { normalize_path(&dir_cur) };
+        let full_path = normalize_path(&format!("{}/{}", dir_cur, name));
+        if storage == "dir" {
+            let from_prefix = full_path.clone();
+            let to_prefix = normalize_path(&format!("/Trash{}", full_path));
+            let _ = sqlx::query("update cloud_files set dir = replace(dir, $1, $2), updated_at = datetime('now') where user_id = $3 and dir like ($1 || '/%')")
+                .bind(&from_prefix)
+                .bind(&to_prefix)
                 .bind(user.user_id.to_string())
                 .execute(&state.db)
                 .await;
-        } else if let Some(path) = &q.path {
-            let np = normalize_path(path);
-            let parent = {
-                let p = Path::new(&np);
-                let pp = p.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
-                if pp.is_empty() { "/".to_string() } else { if pp.starts_with('/') { pp } else { format!("/{}", pp) } }
-            };
-            let name = Path::new(&np).file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
-            let _ = sqlx::query("delete from cloud_files where user_id = $1 and dir = $2 and name = $3")
+            let trash_parent = normalize_path(&format!("/Trash{}", dir_cur));
+            let _ = sqlx::query("update cloud_files set dir = $1, updated_at = datetime('now') where user_id = $2 and dir = $3 and name = $4")
+                .bind(&trash_parent)
                 .bind(user.user_id.to_string())
-                .bind(&parent)
+                .bind(&dir_cur)
                 .bind(&name)
                 .execute(&state.db)
                 .await;
-        }
-        if storage == "blob" && !checksum.is_empty() {
-            let cnt: i64 = sqlx::query_scalar("select count(*) from cloud_files where checksum = $1")
-                .bind(&checksum)
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or(1);
-            if cnt == 0 {
-                let blobs_root = Path::new(&state.storage_path).join("vol1").join("blobs");
-                let _ = std::fs::remove_file(blobs_root.join(&checksum));
-            }
+        } else {
+            let trash_parent = normalize_path(&format!("/Trash{}", dir_cur));
+            let _ = sqlx::query("update cloud_files set dir = $1, updated_at = datetime('now') where user_id = $2 and dir = $3 and name = $4")
+                .bind(&trash_parent)
+                .bind(user.user_id.to_string())
+                .bind(&dir_cur)
+                .bind(&name)
+                .execute(&state.db)
+                .await;
         }
         return Json(serde_json::json!({ "ok": true }));
     }
