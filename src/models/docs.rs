@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize)]
 pub struct DocsListQuery {
     pub path: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -44,4 +46,6 @@ pub struct DocsEntry {
 pub struct DocsListResp {
     pub path: String,
     pub entries: Vec<DocsEntry>,
+    pub has_more: bool,
+    pub next_offset: i64,
 }

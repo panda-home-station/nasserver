@@ -125,7 +125,19 @@ async fn main() {
     .execute(&db)
     .await
     .expect("Failed to create cloud_files table");
-    
+    // Indexes for fast listing and lookup
+    sqlx::query("create index if not exists idx_cloud_files_user_dir on cloud_files(user_id, dir)")
+        .execute(&db)
+        .await
+        .expect("Failed to create idx_cloud_files_user_dir");
+    sqlx::query("create index if not exists idx_cloud_files_user_dir_name on cloud_files(user_id, dir, name)")
+        .execute(&db)
+        .await
+        .expect("Failed to create idx_cloud_files_user_dir_name");
+    sqlx::query("create index if not exists idx_cloud_files_checksum on cloud_files(checksum)")
+        .execute(&db)
+        .await
+        .expect("Failed to create idx_cloud_files_checksum");
     sqlx::query(
         "create table if not exists cloud_blobs (
             file_id text primary key,

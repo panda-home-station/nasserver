@@ -25,14 +25,19 @@ fn normalize_path(p: &str) -> String {
 
 pub async fn list(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<DocsListQuery>) -> impl IntoResponse {
     let dir = normalize_path(&q.path.unwrap_or_else(|| "/".to_string()));
-    let rows = sqlx::query("select id, name, storage, size, strftime('%s', coalesce(updated_at, created_at)) as ts from cloud_files where user_id = $1 and dir = $2 order by storage desc, name asc")
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let page_size = limit + 1;
+    let rows = sqlx::query("select id, name, storage, size, strftime('%s', coalesce(updated_at, created_at)) as ts from cloud_files where user_id = $1 and dir = $2 order by storage desc, name asc limit $3 offset $4")
         .bind(user.user_id.to_string())
         .bind(&dir)
+        .bind(page_size)
+        .bind(offset)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
     let mut entries: Vec<DocsEntry> = Vec::new();
-    for r in rows {
+    for r in rows.iter().take(limit as usize) {
         let id: String = r.try_get("id").unwrap_or_default();
         let name: String = r.try_get("name").unwrap_or_default();
         let storage: String = r.try_get("storage").unwrap_or_default();
@@ -40,7 +45,9 @@ pub async fn list(State(state): State<AppState>, Extension(user): Extension<Auth
         let ts: i64 = r.try_get("ts").unwrap_or(0);
         entries.push(DocsEntry { id, name, is_dir: storage == "dir", size, modified_ts: ts });
     }
-    Json(DocsListResp { path: dir, entries })
+    let has_more = rows.len() > limit as usize;
+    let next_offset = offset + entries.len() as i64;
+    Json(DocsListResp { path: dir, entries, has_more, next_offset })
 }
 
 pub async fn mkdir(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(req): Json<DocsMkdirReq>) -> impl IntoResponse {
