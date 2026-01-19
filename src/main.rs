@@ -18,15 +18,19 @@ use sysinfo::{System, Disks, Networks, Components};
 async fn main() {
     dotenv().ok();
 
-    // Read PNAS_DEV_STORAGE_PATH from env or .env file
     let storage_path = std::env::var("PNAS_DEV_STORAGE_PATH")
         .or_else(|_| read_env_var_from_file("PNAS_DEV_STORAGE_PATH"))
-        .unwrap_or_else(|_| "./volume".to_string());
-    // Ensure the base storage directory exists
+        .unwrap_or_else(|_| "/var/panda/system".to_string());
     let _ = std::fs::create_dir_all(&storage_path);
+    let _ = std::fs::create_dir_all(format!("{}/vol1", &storage_path));
+    let _ = std::fs::create_dir_all(format!("{}/vol1/user", &storage_path));
+    let _ = std::fs::create_dir_all(format!("{}/vol1/apps", &storage_path));
+    let _ = std::fs::create_dir_all(format!("{}/vol1/blobs", &storage_path));
 
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        format!("sqlite:{}/pnas.db", storage_path)
+        let db_dir = format!("{}/db", storage_path);
+        let _ = std::fs::create_dir_all(&db_dir);
+        format!("sqlite:{}/pnas.db", db_dir)
     });
     
     // Try to connect to database directly for better error handling
@@ -102,6 +106,34 @@ async fn main() {
     .await
     .expect("Failed to create file_tasks table");
     println!("File tasks table created/verified");
+    
+    sqlx::query(
+        "create table if not exists cloud_files (
+            id text primary key,
+            user_id text not null,
+            name text not null,
+            dir text,
+            size integer default 0,
+            mime text,
+            checksum text,
+            storage text not null default 'blob',
+            created_at timestamp default CURRENT_TIMESTAMP,
+            updated_at timestamp default CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create cloud_files table");
+    
+    sqlx::query(
+        "create table if not exists cloud_blobs (
+            file_id text primary key,
+            data BLOB
+        )",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create cloud_blobs table");
 
     // Initialize system info components
     // We use System::new() to avoid loading all processes which is slow

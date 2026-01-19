@@ -97,7 +97,7 @@ pub async fn init_system(State(st): State<AppState>, Json(req): Json<InitReq>) -
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
         })?;
 
-    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| "/srv/nas".to_string());
+    let base_root = std::env::var("FS_BASE_DIR").unwrap_or_else(|_| "/var/panda/nas".to_string());
     let user_root = std::path::Path::new(&base_root).join("users").join(uid.to_string());
     let _ = std::fs::create_dir_all(&user_root);
     Ok(Json(serde_json::json!({ "ok": true })))

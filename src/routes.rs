@@ -9,7 +9,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use axum::extract::DefaultBodyLimit;
 
 use crate::state::AppState;
-use crate::handlers::{auth, system, device, fs, docker};
+use crate::handlers::{auth, system, device, docker, docs};
 use crate::middleware::require_auth;
 
 pub fn api_app(state: AppState) -> Router {
@@ -20,12 +20,12 @@ pub fn api_app(state: AppState) -> Router {
 
     let protected = Router::new()
         .route("/api/auth/whoami", get(auth::whoami))
-        .route("/api/fs/list", get(fs::fs_list))
-        .route("/api/fs/mkdir", post(fs::fs_mkdir))
-        .route("/api/fs/delete", delete(fs::fs_delete))
-        .route("/api/fs/rename", post(fs::fs_rename))
-        .route("/api/fs/download", get(fs::fs_download))
-        .route("/api/fs/upload", post(fs::fs_upload))
+        .route("/api/docs/list", get(docs::list))
+        .route("/api/docs/mkdir", post(docs::mkdir))
+        .route("/api/docs/delete", delete(docs::delete))
+        .route("/api/docs/rename", post(docs::rename))
+        .route("/api/docs/download", get(docs::download))
+        .route("/api/docs/upload", post(docs::upload))
         // Docker management
         .route("/api/docker/containers", get(docker::list_containers))
         .route("/api/docker/images", get(docker::list_images))

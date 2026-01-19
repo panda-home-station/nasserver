@@ -28,7 +28,7 @@ pub async fn fs_list(State(state): State<AppState>, Extension(user): Extension<A
         Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
     };
     
-    let base = format!("{}/{}", state.storage_path, username);
+    let base = format!("{}/vol1/{}", state.storage_path, username);
     let req_path = q.path.unwrap_or_else(|| "/".to_string());
 
     let norm = if req_path.starts_with('/') {
@@ -106,7 +106,7 @@ pub async fn fs_mkdir(State(state): State<AppState>, Extension(user): Extension<
         Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
     };
     
-    let base = format!("{}/{}", state.storage_path, username);
+    let base = format!("{}/vol1/{}", state.storage_path, username);
     let req_path = req.path;
     let norm = if req_path.starts_with('/') { &req_path[1..] } else { req_path.as_str() };
     let joined: PathBuf = Path::new(&base).join(norm);
@@ -136,7 +136,7 @@ pub async fn fs_delete(State(state): State<AppState>, Extension(user): Extension
         Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
     };
     
-    let base = format!("{}/{}", state.storage_path, username);
+    let base = format!("{}/vol1/{}", state.storage_path, username);
     let req_path = q.path;
     let norm = if req_path.starts_with('/') { &req_path[1..] } else { req_path.as_str() };
     let joined: PathBuf = Path::new(&base).join(norm);
@@ -173,7 +173,7 @@ pub async fn fs_rename(State(state): State<AppState>, Extension(user): Extension
         Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
     };
     
-    let base = format!("{}/{}", state.storage_path, username);
+    let base = format!("{}/vol1/{}", state.storage_path, username);
 
     let norm_from = if req.from.starts_with('/') { &req.from[1..] } else { req.from.as_str() };
     let from_joined: PathBuf = Path::new(&base).join(norm_from);
@@ -210,7 +210,7 @@ pub async fn fs_download(State(state): State<AppState>, Extension(user): Extensi
         Err(_) => user.user_id.to_string(), // fallback to user_id if username not found
     };
     
-    let base = format!("{}/{}", state.storage_path, username);
+    let base = format!("{}/vol1/{}", state.storage_path, username);
     let req_path = q.path;
     let norm = if req_path.starts_with('/') { &req_path[1..] } else { req_path.as_str() };
     let joined: PathBuf = Path::new(&base).join(norm);
@@ -278,7 +278,7 @@ pub async fn fs_upload(State(state): State<AppState>, Extension(user): Extension
             dest_path = field.text().await.unwrap_or("/".to_string());
         } else if name == "file" {
             let file_name = field.file_name().map(|s| s.to_string()).unwrap_or("upload.bin".to_string());
-            let base = format!("{}/{}", state.storage_path, username);
+            let base = format!("{}/vol1/{}", state.storage_path, username);
             let norm = if dest_path.starts_with('/') { &dest_path[1..] } else { dest_path.as_str() };
             let dir_joined: PathBuf = Path::new(&base).join(norm);
             let base_abs = std::fs::canonicalize(&base).unwrap_or_else(|_| PathBuf::from(&base));
