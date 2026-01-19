@@ -45,6 +45,27 @@ pub async fn list(State(state): State<AppState>, Extension(user): Extension<Auth
 
 pub async fn mkdir(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(req): Json<DocsMkdirReq>) -> impl IntoResponse {
     let dir = normalize_path(&req.path);
+    let reserved: [&str; 8] = [
+        "AppData",
+        "Favorites",
+        "MyShares",
+        "PublicLinks",
+        "Recent",
+        "SharedWithMe",
+        "Team",
+        "Trash",
+    ];
+    let top_name = Path::new(&dir).components().next().and_then(|c| {
+        use std::path::Component;
+        match c {
+            Component::RootDir => None,
+            Component::Normal(os) => os.to_str(),
+            _ => None,
+        }
+    }).unwrap_or("");
+    if reserved.contains(&top_name) && dir == format!("/{}", top_name) {
+        return Json(serde_json::json!({ "ok": true }));
+    }
     let parent = {
         let p = Path::new(&dir);
         let pp = p.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
