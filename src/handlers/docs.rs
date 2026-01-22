@@ -6,8 +6,9 @@ use axum::{
 use axum::body::Body;
 use axum::response::Response;
 use tokio_util::io::ReaderStream;
-use tokio::io::AsyncWriteExt;
-use tokio::fs as tokio_fs;
+use tokio::io::{AsyncWriteExt, AsyncSeekExt};
+use tokio::fs::{self as tokio_fs, OpenOptions};
+use std::io::SeekFrom;
 use std::path::Path;
 use sqlx::Row;
 
@@ -104,61 +105,170 @@ pub async fn mkdir(State(state): State<AppState>, Extension(user): Extension<Aut
 }
 
 pub async fn upload(State(state): State<AppState>, Extension(user): Extension<AuthUser>, mut multipart: Multipart) -> impl IntoResponse {
+    println!("[upload] start upload request for user: {}", user.user_id);
     let mut dest_path = "/".to_string();
     let mut saved_name: Option<String> = None;
-    let mut total_written: usize = 0;
+    let mut expected_size: Option<u64> = None;
+    let mut upload_id = String::new();
+    let mut offset: u64 = 0;
+
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
+        // println!("[upload] processing field: {}", name);
         if name == "path" {
             dest_path = normalize_path(&field.text().await.unwrap_or("/".to_string()));
+            println!("[upload] dest_path: {}", dest_path);
+        } else if name == "size" {
+            if let Ok(s) = field.text().await.unwrap_or_default().parse::<u64>() {
+                expected_size = Some(s);
+                println!("[upload] expected_size: {}", s);
+            }
+        } else if name == "upload_id" {
+            upload_id = field.text().await.unwrap_or_default();
+            println!("[upload] upload_id: {}", upload_id);
+        } else if name == "offset" {
+            if let Ok(o) = field.text().await.unwrap_or_default().parse::<u64>() {
+                offset = o;
+                println!("[upload] offset: {}", offset);
+            }
         } else if name == "file" {
             let file_name = field.file_name().map(|s| s.to_string()).unwrap_or("upload.bin".to_string());
-            let mut hasher = sha2::Sha256::new();
+            println!("[upload] start processing file: {}", file_name);
             let blobs_root = Path::new(&state.storage_path).join("vol1").join("blobs");
             let _ = std::fs::create_dir_all(&blobs_root);
-            let tmp_id = uuid::Uuid::new_v4().to_string();
+            
+            let tmp_id = if !upload_id.is_empty() { upload_id.clone() } else { uuid::Uuid::new_v4().to_string() };
             let tmp_path = blobs_root.join(format!("{}.part", tmp_id));
-            let mut f = match tokio_fs::File::create(&tmp_path).await {
-                Ok(h) => h,
-                Err(_) => return Json(serde_json::json!({ "ok": false })),
+            println!("[upload] tmp_path: {:?}", tmp_path);
+            
+            let mut f = if offset > 0 {
+                if let Ok(mut file) = OpenOptions::new().write(true).create(true).open(&tmp_path).await {
+                    if let Err(e) = file.seek(SeekFrom::Start(offset)).await {
+                        println!("[upload] seek failed: {}", e);
+                        return Json(serde_json::json!({ "ok": false, "error": "seek failed" }));
+                    }
+                    file
+                } else {
+                    println!("[upload] open for append failed");
+                    return Json(serde_json::json!({ "ok": false, "error": "open failed" }));
+                }
+            } else {
+                match tokio_fs::File::create(&tmp_path).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        println!("[upload] create failed: {}", e);
+                        return Json(serde_json::json!({ "ok": false, "error": "create failed" }));
+                    },
+                }
             };
+
+            let mut hasher_opt = if offset == 0 {
+                Some(sha2::Sha256::new())
+            } else {
+                None
+            };
+
+            let mut written_this_chunk: u64 = 0;
             while let Ok(Some(chunk)) = field.chunk().await {
-                total_written += chunk.len();
-                hasher.update(&chunk);
-                if let Err(_) = f.write_all(&chunk).await {
-                    return Json(serde_json::json!({ "ok": false }));
+                written_this_chunk += chunk.len() as u64;
+                if let Err(e) = f.write_all(&chunk).await {
+                    println!("[upload] write failed: {}", e);
+                    return Json(serde_json::json!({ "ok": false, "error": "write failed" }));
+                }
+                if let Some(h) = hasher_opt.as_mut() {
+                    h.update(&chunk);
                 }
             }
-            let digest = hasher.finalize();
+            println!("[upload] written_this_chunk: {}", written_this_chunk);
+            
+            // Check total size
+            let current_size = match tokio_fs::metadata(&tmp_path).await {
+                Ok(m) => m.len(),
+                Err(_) => offset + written_this_chunk, // fallback
+            };
+            println!("[upload] current_size: {}", current_size);
+
+            if let Some(es) = expected_size {
+                if current_size != es {
+                    // Not finished yet, or size mismatch
+                    // Do NOT delete the file, so we can resume
+                    // But return ok so client knows chunk is saved
+                    println!("[upload] partial upload: current={} expected={}", current_size, es);
+                    return Json(serde_json::json!({ "ok": true, "done": false, "bytes": current_size }));
+                }
+            }
+
+            // Calculate hash of the FULL file
+            // Note: This is expensive for large files to do at the end, but necessary if we didn't hash incrementally.
+            // Since we supported resume, incremental hashing state is lost unless we save it. 
+            // So we must re-read the file to hash it.
+            let digest = if let Some(h) = hasher_opt {
+                 println!("[upload] using incremental hash");
+                 h.finalize()
+            } else {
+                println!("[upload] calculating hash (full re-read)...");
+                let mut hasher = sha2::Sha256::new();
+                if let Ok(mut file) = tokio_fs::File::open(&tmp_path).await {
+                    // Increase buffer size to 1MB for faster reading
+                    let mut buffer = vec![0u8; 1024 * 1024]; 
+                    loop {
+                        let n = match tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await {
+                            Ok(n) if n == 0 => break,
+                            Ok(n) => n,
+                            Err(_) => break,
+                        };
+                        hasher.update(&buffer[..n]);
+                    }
+                }
+                hasher.finalize()
+            };
+            
             let mut hex = String::with_capacity(digest.len() * 2);
             for b in digest {
                 hex.push_str(&format!("{:02x}", b));
             }
+            println!("[upload] hash: {}", hex);
+
             let final_path = blobs_root.join(&hex);
-            let _ = tokio_fs::rename(&tmp_path, &final_path).await;
+            if let Err(e) = tokio_fs::rename(&tmp_path, &final_path).await {
+                println!("[upload] rename failed: {}", e);
+            }
+            
             let id = uuid::Uuid::new_v4().to_string();
             let parent = {
                 let p = Path::new(&dest_path);
                 let pp = p.to_string_lossy().to_string();
                 if pp.is_empty() { "/".to_string() } else { pp }
             };
-            let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, checksum, storage) values ($1, $2, $3, $4, $5, $6, $7, 'blob')")
+            
+            println!("[upload] inserting db record: id={}, name={}, parent={}", id, file_name, parent);
+            let res = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, checksum, storage) values ($1, $2, $3, $4, $5, $6, $7, 'blob')")
                 .bind(&id)
                 .bind(user.user_id.to_string())
                 .bind(&file_name)
                 .bind(&parent)
-                .bind(total_written as i64)
+                .bind(current_size as i64)
                 .bind("")
                 .bind(&hex)
                 .execute(&state.db)
                 .await;
+            
+            if let Err(e) = res {
+                println!("[upload] db insert failed: {}", e);
+            } else {
+                println!("[upload] db insert success");
+            }
+
             saved_name = Some(file_name);
+            
+            // Return success with bytes
+            return Json(serde_json::json!({ "ok": true, "done": true, "bytes": current_size }));
         }
     }
     if saved_name.is_none() {
         return Json(serde_json::json!({ "ok": false }));
     }
-    Json(serde_json::json!({ "ok": true, "bytes": total_written }))
+    Json(serde_json::json!({ "ok": true }))
 }
 
 pub async fn download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<DocsDownloadQuery>) -> Response {
