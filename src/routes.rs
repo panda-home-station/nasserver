@@ -26,6 +26,9 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/docs/rename", post(docs::rename))
         .route("/api/docs/download", get(docs::download))
         .route("/api/docs/upload", post(docs::upload))
+        // User preferences
+        .route("/api/user/wallpaper", get(crate::handlers::user::get_wallpaper))
+        .route("/api/user/wallpaper", post(crate::handlers::user::set_wallpaper))
         // Docker management
         .route("/api/docker/containers", get(docker::list_containers))
         .route("/api/docker/images", get(docker::list_images))

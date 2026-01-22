@@ -78,6 +78,21 @@ async fn main() {
         println!("Users role column already exists");
     }
 
+    // Add wallpaper column for per-user desktop settings if missing
+    let row_wp: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'wallpaper'")
+        .fetch_one(&db)
+        .await
+        .expect("Failed to query pragma_table_info for users table (wallpaper)");
+    if row_wp.0 == 0 {
+        sqlx::query("ALTER TABLE users ADD COLUMN wallpaper TEXT")
+            .execute(&db)
+            .await
+            .expect("Failed to alter users table to add wallpaper column");
+        println!("Users wallpaper column added");
+    } else {
+        println!("Users wallpaper column already exists");
+    }
+
     sqlx::query(
         "create table if not exists system_config (
             key text primary key,
