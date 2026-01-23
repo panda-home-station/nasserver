@@ -16,6 +16,7 @@ use crate::state::AppState;
 use crate::models::auth::AuthUser;
 use crate::models::docs::{DocsListQuery, DocsListResp, DocsEntry, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery};
 use sha2::Digest;
+use serde::Deserialize;
 
 fn normalize_path(p: &str) -> String {
     let s = if p.starts_with('/') { &p[1..] } else { p };
@@ -111,10 +112,11 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
     let mut expected_size: Option<u64> = None;
     let mut upload_id = String::new();
     let mut offset: u64 = 0;
+    let mut checksum_opt: Option<String> = None;
 
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
-        // println!("[upload] processing field: {}", name);
+        println!("[upload] processing field: {}", name);
         if name == "path" {
             dest_path = normalize_path(&field.text().await.unwrap_or("/".to_string()));
             println!("[upload] dest_path: {}", dest_path);
@@ -131,15 +133,66 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
                 offset = o;
                 println!("[upload] offset: {}", offset);
             }
+        } else if name == "checksum" {
+            let cs = field.text().await.unwrap_or_default();
+            if !cs.is_empty() {
+                checksum_opt = Some(cs);
+            }
+            if let Some(csx) = checksum_opt.as_ref() {
+                println!("[upload] received checksum: {}", csx);
+            }
         } else if name == "file" {
             let file_name = field.file_name().map(|s| s.to_string()).unwrap_or("upload.bin".to_string());
             println!("[upload] start processing file: {}", file_name);
             let blobs_root = Path::new(&state.storage_path).join("vol1").join("blobs");
             let _ = std::fs::create_dir_all(&blobs_root);
+            let pending_dir = blobs_root.join("pending");
+            let _ = std::fs::create_dir_all(&pending_dir);
+            
+            if offset == 0 {
+                if let Some(cs) = checksum_opt.as_ref() {
+                    let final_path = blobs_root.join(cs);
+                    let exists = tokio_fs::metadata(&final_path).await.ok().map(|m| m.is_file()).unwrap_or(false);
+                    let pending = tokio_fs::metadata(pending_dir.join(cs)).await.ok().map(|m| m.is_file()).unwrap_or(false);
+                    println!("[upload] pre-file short-circuit check: exists={} pending={} checksum={}", exists, pending, cs);
+                    if exists || pending {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let parent = {
+                            let p = Path::new(&dest_path);
+                            let pp = p.to_string_lossy().to_string();
+                            if pp.is_empty() { "/".to_string() } else { pp }
+                        };
+                        let sz = expected_size.map(|x| x as i64).unwrap_or(0);
+                        let res = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, checksum, storage) values ($1, $2, $3, $4, $5, $6, $7, 'blob')")
+                            .bind(&id)
+                            .bind(user.user_id.to_string())
+                            .bind(&file_name)
+                            .bind(&parent)
+                            .bind(sz)
+                            .bind("")
+                            .bind(cs)
+                            .execute(&state.db)
+                            .await;
+                        if res.is_ok() {
+                            println!("[upload] rapid by checksum: id={}, name={}, parent={} size={}", id, file_name, parent, sz);
+                            return Json(serde_json::json!({ "ok": true, "done": true, "bytes": sz }));
+                        } else {
+                            println!("[upload] rapid by checksum insert failed, fallback to normal upload");
+                        }
+                    }
+                }
+            }
             
             let tmp_id = if !upload_id.is_empty() { upload_id.clone() } else { uuid::Uuid::new_v4().to_string() };
             let tmp_path = blobs_root.join(format!("{}.part", tmp_id));
             println!("[upload] tmp_path: {:?}", tmp_path);
+            
+            if offset == 0 {
+                if let Some(cs) = checksum_opt.as_ref() {
+                    let _ = tokio_fs::File::create(pending_dir.join(cs)).await;
+                    println!("[upload] created pending mark for checksum {}", cs);
+                }
+            }
             
             let mut f = if offset > 0 {
                 if let Ok(mut file) = OpenOptions::new().write(true).create(true).open(&tmp_path).await {
@@ -230,8 +283,15 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
             println!("[upload] hash: {}", hex);
 
             let final_path = blobs_root.join(&hex);
+            let existed_before = tokio_fs::metadata(&final_path).await.ok().map(|m| m.is_file()).unwrap_or(false);
             if let Err(e) = tokio_fs::rename(&tmp_path, &final_path).await {
                 println!("[upload] rename failed: {}", e);
+            } else {
+                println!("[upload] finalize blob: path={:?} existed_before={}", final_path, existed_before);
+            }
+            if let Some(cs) = checksum_opt.as_ref() {
+                let _ = tokio_fs::remove_file(pending_dir.join(cs)).await;
+                println!("[upload] removed pending mark for checksum {}", cs);
             }
             
             let id = uuid::Uuid::new_v4().to_string();
@@ -269,6 +329,65 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
         return Json(serde_json::json!({ "ok": false }));
     }
     Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+pub struct RapidUploadReq {
+    pub path: String,
+    pub name: String,
+    pub size: i64,
+    pub checksum: Option<String>,
+}
+
+pub async fn rapid_upload(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(req): Json<RapidUploadReq>) -> impl IntoResponse {
+    let dir = normalize_path(&req.path);
+    let blobs_root = Path::new(&state.storage_path).join("vol1").join("blobs");
+    let pending_dir = blobs_root.join("pending");
+    let mut checksum_use: Option<String> = None;
+    if let Some(cs) = req.checksum.as_ref() {
+        if !cs.is_empty() {
+            let blob_path = blobs_root.join(cs);
+            let exists = tokio_fs::metadata(&blob_path).await.ok().map(|m| m.is_file()).unwrap_or(false);
+            let pending = tokio_fs::metadata(pending_dir.join(cs)).await.ok().map(|m| m.is_file()).unwrap_or(false);
+            println!("[rapid-upload] user={} name={} dir={} size={} checksum={} exists={}", user.user_id, req.name, dir, req.size, cs, exists);
+            if exists || pending {
+                checksum_use = Some(cs.clone());
+            }
+        }
+    }
+    if checksum_use.is_none() {
+        let found = sqlx::query("select checksum from cloud_files where user_id = $1 and name = $2 and size = $3 and storage = 'blob' order by updated_at desc limit 1")
+            .bind(user.user_id.to_string())
+            .bind(&req.name)
+            .bind(req.size)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .and_then(|row_opt| row_opt.map(|row| row.try_get::<String, _>("checksum").unwrap_or_default()))
+            .filter(|cs| !cs.is_empty());
+        if let Some(cs) = found {
+            checksum_use = Some(cs);
+        } else {
+            return Json(serde_json::json!({ "ok": true, "rapid": false }));
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let res = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, checksum, storage) values ($1, $2, $3, $4, $5, $6, $7, 'blob')")
+        .bind(&id)
+        .bind(user.user_id.to_string())
+        .bind(&req.name)
+        .bind(&dir)
+        .bind(req.size)
+        .bind("")
+        .bind(&checksum_use.unwrap())
+        .execute(&state.db)
+        .await;
+    if res.is_ok() {
+        println!("[rapid-upload] insert success: id={} name={} dir={}", id, req.name, dir);
+    } else {
+        println!("[rapid-upload] insert failed; fallback to normal upload");
+    }
+    Json(serde_json::json!({ "ok": res.is_ok(), "rapid": res.is_ok() }))
 }
 
 pub async fn download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<DocsDownloadQuery>) -> Response {
