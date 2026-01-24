@@ -41,6 +41,9 @@ pub fn api_app(state: AppState) -> Router {
         // Registry
         .route("/api/docker/registry/search", get(crate::handlers::docker_registry::search))
         .route("/api/docker/registry/hot", get(crate::handlers::docker_registry::hot))
+        // Registry settings
+        .route("/api/docker/mirrors", get(crate::handlers::docker_registry::get_mirrors))
+        .route("/api/docker/mirrors", post(crate::handlers::docker_registry::set_mirrors))
         .route("/api/tasks", get(crate::handlers::task::list_tasks))
         .route("/api/tasks", post(crate::handlers::task::create_task))
         .route("/api/tasks/:id", post(crate::handlers::task::update_task))

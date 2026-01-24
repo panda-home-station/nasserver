@@ -12,6 +12,7 @@ use bollard::container::{
 };
 use bollard::image::{ListImagesOptions, CreateImageOptions};
 use futures_util::stream::StreamExt;
+use sqlx::Row;
 
 use crate::state::AppState;
 
@@ -168,19 +169,115 @@ pub async fn remove_container(State(_st): State<AppState>, Json(req): Json<IdReq
 
 pub async fn pull_image(State(_st): State<AppState>, Json(req): Json<PullReq>) -> impl IntoResponse {
     let docker = docker_client();
-    let from_image = req.image;
+    let original = req.image;
     let tag = req.tag.unwrap_or_else(|| "latest".to_string());
-    let mut stream = docker.create_image(
-        Some(CreateImageOptions {
-            from_image,
-            tag,
-            ..Default::default()
-        }),
-        None,
-        None,
-    );
-    while let Some(_update) = stream.next().await {
-        // ignore progress details; we could stream to client later
+    eprintln!("docker pull start image={} tag={}", original, tag);
+    // Load mirrors list or fallback to legacy single setting
+    #[derive(serde::Deserialize)]
+    struct MirrorEntry { host: String, enabled: bool }
+    #[derive(serde::Deserialize)]
+    struct DockerSettings { mode: String, host: Option<String> }
+    let list_json: Option<String> = sqlx::query_scalar("select value from system_config where key = 'docker_mirrors'")
+        .fetch_optional(&_st.db)
+        .await
+        .unwrap_or(None);
+    let mirrors: Vec<MirrorEntry> = list_json
+        .and_then(|s| serde_json::from_str::<Vec<MirrorEntry>>(&s).ok())
+        .unwrap_or_default();
+    let enabled_hosts_preview: Vec<String> = mirrors.iter().filter(|m| m.enabled).map(|m| m.host.clone()).collect();
+    eprintln!("docker pull enabled mirrors={:?}", enabled_hosts_preview);
+    let legacy_json: Option<String> = sqlx::query_scalar("select value from system_config where key = 'docker_mirror'")
+        .fetch_optional(&_st.db)
+        .await
+        .unwrap_or(None);
+    let legacy: DockerSettings = legacy_json
+        .and_then(|s| serde_json::from_str::<DockerSettings>(&s).ok())
+        .unwrap_or(DockerSettings { mode: "none".to_string(), host: None });
+    let has_host = original.contains('.') && original.contains('/');
+    let mut candidates: Vec<(String, Option<String>)> = Vec::new();
+    if has_host {
+        candidates.push((original.clone(), None));
+    } else {
+        let enabled_hosts: Vec<String> = mirrors
+            .into_iter()
+            .filter(|m| m.enabled)
+            .map(|m| m.host.trim().to_string())
+            .collect();
+        if enabled_hosts.is_empty() {
+            let h = match legacy.mode.as_str() {
+                "daocloud" => Some("docker.m.daocloud.io".to_string()),
+                "netease" => Some("hub-mirror.c.163.com".to_string()),
+                "tencent" => Some("mirror.ccs.tencentyun.com".to_string()),
+                "aliyun" => Some("registry.aliyuncs.com".to_string()),
+                "custom" => legacy.host.clone(),
+                _ => None,
+            };
+            if let Some(h) = h {
+                let ref_ = if original.contains('/') {
+                    format!("{}/{}", h, original)
+                } else {
+                    format!("{}/library/{}", h, original)
+                };
+                candidates.push((ref_, Some(h)));
+            }
+        } else {
+            for h in enabled_hosts {
+                let ref_ = if original.contains('/') {
+                    format!("{}/{}", h, original)
+                } else {
+                    format!("{}/library/{}", h, original)
+                };
+                candidates.push((ref_, Some(h)));
+            }
+        }
+        candidates.push((original.clone(), None));
     }
-    Json(serde_json::json!({ "ok": true })).into_response()
+    let mut used: Option<String> = None;
+    let mut last_err: Option<String> = None;
+    for (from_image, source) in candidates {
+        let src_name = source.clone().unwrap_or_else(|| "docker.io".to_string());
+        eprintln!("docker pull try source={} ref={}", src_name, from_image);
+        let mut stream = docker.create_image(
+            Some(CreateImageOptions {
+                from_image,
+                tag: tag.clone(),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let mut ok = true;
+        while let Some(update) = stream.next().await {
+            match update {
+                Ok(_) => {}
+                Err(e) => {
+                    ok = false;
+                    last_err = Some(e.to_string());
+                    eprintln!("docker pull error source={} err={}", src_name, last_err.as_deref().unwrap_or(""));
+                    break;
+                }
+            }
+        }
+        if ok {
+            used = source;
+            if let Some(ref src) = used {
+                eprintln!("docker pull success source={}", src);
+            } else {
+                eprintln!("docker pull success source=docker.io");
+            }
+            break;
+        }
+    }
+    match used {
+        Some(src) => Json(serde_json::json!({ "ok": true, "source": src })).into_response(),
+        None => {
+            if has_host {
+                eprintln!("docker pull success source={}", original);
+                Json(serde_json::json!({ "ok": true, "source": original })).into_response()
+            } else {
+                eprintln!("docker pull failed err={}", last_err.as_deref().unwrap_or(""));
+                (StatusCode::INTERNAL_SERVER_ERROR, last_err.unwrap_or_else(|| "pull failed".to_string())).into_response()
+            }
+        }
+    }
 }
