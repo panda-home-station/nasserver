@@ -27,3 +27,5 @@ local-ip-address = "0.6"
 bollard = "0.15"
 futures-util = "0.3"
 sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+urlencoding = "2.1"

@@ -38,6 +38,9 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/docker/container/restart", post(docker::restart_container))
         .route("/api/docker/container/remove", post(docker::remove_container))
         .route("/api/docker/image/pull", post(docker::pull_image))
+        // Registry
+        .route("/api/docker/registry/search", get(crate::handlers::docker_registry::search))
+        .route("/api/docker/registry/hot", get(crate::handlers::docker_registry::hot))
         .route("/api/tasks", get(crate::handlers::task::list_tasks))
         .route("/api/tasks", post(crate::handlers::task::create_task))
         .route("/api/tasks/:id", post(crate::handlers::task::update_task))
