@@ -9,7 +9,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use axum::extract::DefaultBodyLimit;
 
 use crate::state::AppState;
-use crate::handlers::{auth, system, device, podman, docs};
+use crate::handlers::{auth, system, device, docker, docs};
 use crate::middleware::require_auth;
 
 pub fn api_app(state: AppState) -> Router {
@@ -30,14 +30,14 @@ pub fn api_app(state: AppState) -> Router {
         // User preferences
         .route("/api/user/wallpaper", get(crate::handlers::user::get_wallpaper))
         .route("/api/user/wallpaper", post(crate::handlers::user::set_wallpaper))
-        // Podman management
-        .route("/api/podman/containers", get(podman::list_containers))
-        .route("/api/podman/images", get(podman::list_images))
-        .route("/api/podman/container/start", post(podman::start_container))
-        .route("/api/podman/container/stop", post(podman::stop_container))
-        .route("/api/podman/container/restart", post(podman::restart_container))
-        .route("/api/podman/container/remove", post(podman::remove_container))
-        .route("/api/podman/image/pull", post(podman::pull_image))
+        // Podman management (via Docker-compatible client; supports Podman socket)
+        .route("/api/podman/containers", get(docker::list_containers))
+        .route("/api/podman/images", get(docker::list_images))
+        .route("/api/podman/container/start", post(docker::start_container))
+        .route("/api/podman/container/stop", post(docker::stop_container))
+        .route("/api/podman/container/restart", post(docker::restart_container))
+        .route("/api/podman/container/remove", post(docker::remove_container))
+        .route("/api/podman/image/pull", post(docker::pull_image))
         // Registry
         .route("/api/podman/registry/search", get(crate::handlers::docker_registry::search))
         .route("/api/podman/registry/hot", get(crate::handlers::docker_registry::hot))

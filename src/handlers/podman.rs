@@ -70,6 +70,11 @@ struct PodmanImage {
 }
 
 fn podman_socket() -> Option<String> {
+    if let Ok(p) = std::env::var("PODMAN_SOCKET") {
+        if !p.trim().is_empty() && std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
     // Try XDG_RUNTIME_DIR (rootless)
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         let p = format!("{}/podman/podman.sock", xdg);
@@ -98,9 +103,9 @@ async fn call_podman(method: Method, subpath: &str, query: Option<&str>) -> Resu
     let sock = podman_socket().ok_or_else(|| "podman socket not found".to_string())?;
     let client: Client<_, HyperBody> = Client::unix();
 
-    // Try API versions: v4, v3, v2, v1
-    let bases = ["/v4.0.0/libpod", "/v3.0.0/libpod", "/v2.0.0/libpod", "/v1.0.0/libpod"];
+    let bases = ["/v5.0.0/libpod", "/v4.0.0/libpod", "/v3.0.0/libpod", "/v2.0.0/libpod", "/v1.0.0/libpod"];
     
+    let mut last: Option<(StatusCode, bytes::Bytes)> = None;
     for base in bases {
         let mut path = format!("{}/{}", base, subpath.trim_start_matches('/'));
         if let Some(q) = query {
@@ -119,14 +124,15 @@ async fn call_podman(method: Method, subpath: &str, query: Option<&str>) -> Resu
         let status_v02 = resp.status();
         let status = StatusCode::from_u16(status_v02.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let body = to_bytes(resp.into_body()).await.map_err(|e: hyper::Error| e.to_string())?;
-        
-        // If not found, try next version (unless it's the last one)
-        // Note: strict check might be better, but libpod usually returns 404 for unknown endpoints
-        if status != StatusCode::NOT_FOUND {
+        if status.is_success() {
             return Ok((status, body));
         }
+        last = Some((status, body));
     }
     
+    if let Some((status, body)) = last {
+        return Ok((status, body));
+    }
     Err("podman API not found".to_string())
 }
 
