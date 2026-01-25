@@ -1,17 +1,17 @@
 use axum::{
     extract::State,
+    http::StatusCode,
     response::IntoResponse,
     Json,
-    http::StatusCode,
 };
-use serde::Serialize;
-use bollard::Docker;
 use bollard::container::{
-    ListContainersOptions, StartContainerOptions, StopContainerOptions, RestartContainerOptions,
-    RemoveContainerOptions,
+    ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions,
+    StopContainerOptions,
 };
-use bollard::image::{ListImagesOptions, CreateImageOptions};
+use bollard::image::{CreateImageOptions, ListImagesOptions};
+use bollard::Docker;
 use futures_util::stream::StreamExt;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::state::AppState;
@@ -20,13 +20,54 @@ fn docker_client() -> Docker {
     if let Ok(host) = std::env::var("DOCKER_HOST") {
         if host.starts_with("unix://") {
             let p = host.trim_start_matches("unix://");
-            return Docker::connect_with_unix(p, 120, &bollard::API_DEFAULT_VERSION).unwrap();
-        } else {
-            // tcp or http(s)
-            return Docker::connect_with_local_defaults().unwrap();
+            if let Ok(cli) = Docker::connect_with_unix(p, 120, &bollard::API_DEFAULT_VERSION) {
+                return cli;
+            }
+        } else if let Ok(cli) = Docker::connect_with_local_defaults() {
+            return cli;
         }
     }
-    Docker::connect_with_unix("/var/run/docker.sock", 120, &bollard::API_DEFAULT_VERSION).unwrap()
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        let podman_sock = format!("{}/podman/podman.sock", xdg);
+        if std::path::Path::new(&podman_sock).exists() {
+            if let Ok(cli) = Docker::connect_with_unix(&podman_sock, 120, &bollard::API_DEFAULT_VERSION) {
+                return cli;
+            }
+        }
+    }
+    if let Ok(uid) = nix_current_uid() {
+        let p = format!("/run/user/{}/podman/podman.sock", uid);
+        if std::path::Path::new(&p).exists() {
+            if let Ok(cli) = Docker::connect_with_unix(&p, 120, &bollard::API_DEFAULT_VERSION) {
+                return cli;
+            }
+        }
+    }
+    let system_podman = "/run/podman/podman.sock";
+    if std::path::Path::new(system_podman).exists() {
+        if let Ok(cli) = Docker::connect_with_unix(system_podman, 120, &bollard::API_DEFAULT_VERSION) {
+            return cli;
+        }
+    }
+    let docker_sock = "/var/run/docker.sock";
+    if std::path::Path::new(docker_sock).exists() {
+        if let Ok(cli) = Docker::connect_with_unix(docker_sock, 120, &bollard::API_DEFAULT_VERSION) {
+            return cli;
+        }
+    }
+    Docker::connect_with_local_defaults().unwrap()
+}
+
+fn nix_current_uid() -> Result<u32, ()> {
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::getuid() };
+        Ok(uid)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(())
+    }
 }
 
 #[derive(Serialize)]
@@ -106,12 +147,12 @@ pub async fn list_images(State(_st): State<AppState>) -> impl IntoResponse {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 pub struct IdReq {
     id: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 pub struct PullReq {
     image: String,
     tag: Option<String>,
@@ -167,32 +208,39 @@ pub async fn remove_container(State(_st): State<AppState>, Json(req): Json<IdReq
     }
 }
 
-pub async fn pull_image(State(_st): State<AppState>, Json(req): Json<PullReq>) -> impl IntoResponse {
+pub async fn pull_image(State(st): State<AppState>, Json(req): Json<PullReq>) -> impl IntoResponse {
     let docker = docker_client();
     let original = req.image;
     let tag = req.tag.unwrap_or_else(|| "latest".to_string());
-    eprintln!("docker pull start image={} tag={}", original, tag);
-    // Load mirrors list or fallback to legacy single setting
-    #[derive(serde::Deserialize)]
-    struct MirrorEntry { host: String, enabled: bool }
-    #[derive(serde::Deserialize)]
-    struct DockerSettings { mode: String, host: Option<String> }
-    let list_json: Option<String> = sqlx::query_scalar("select value from system_config where key = 'docker_mirrors'")
-        .fetch_optional(&_st.db)
-        .await
-        .unwrap_or(None);
+    #[derive(Deserialize)]
+    struct MirrorEntry {
+        host: String,
+        enabled: bool,
+    }
+    #[derive(Deserialize)]
+    struct DockerSettings {
+        mode: String,
+        host: Option<String>,
+    }
+    let list_json: Option<String> =
+        sqlx::query_scalar("select value from system_config where key = 'docker_mirrors'")
+            .fetch_optional(&st.db)
+            .await
+            .unwrap_or(None);
     let mirrors: Vec<MirrorEntry> = list_json
         .and_then(|s| serde_json::from_str::<Vec<MirrorEntry>>(&s).ok())
         .unwrap_or_default();
-    let enabled_hosts_preview: Vec<String> = mirrors.iter().filter(|m| m.enabled).map(|m| m.host.clone()).collect();
-    eprintln!("docker pull enabled mirrors={:?}", enabled_hosts_preview);
-    let legacy_json: Option<String> = sqlx::query_scalar("select value from system_config where key = 'docker_mirror'")
-        .fetch_optional(&_st.db)
-        .await
-        .unwrap_or(None);
+    let legacy_json: Option<String> =
+        sqlx::query_scalar("select value from system_config where key = 'docker_mirror'")
+            .fetch_optional(&st.db)
+            .await
+            .unwrap_or(None);
     let legacy: DockerSettings = legacy_json
         .and_then(|s| serde_json::from_str::<DockerSettings>(&s).ok())
-        .unwrap_or(DockerSettings { mode: "none".to_string(), host: None });
+        .unwrap_or(DockerSettings {
+            mode: "none".to_string(),
+            host: None,
+        });
     let has_host = original.contains('.') && original.contains('/');
     let mut candidates: Vec<(String, Option<String>)> = Vec::new();
     if has_host {
@@ -236,7 +284,6 @@ pub async fn pull_image(State(_st): State<AppState>, Json(req): Json<PullReq>) -
     let mut last_err: Option<String> = None;
     for (from_image, source) in candidates {
         let src_name = source.clone().unwrap_or_else(|| "docker.io".to_string());
-        eprintln!("docker pull try source={} ref={}", src_name, from_image);
         let mut stream = docker.create_image(
             Some(CreateImageOptions {
                 from_image,
@@ -253,18 +300,12 @@ pub async fn pull_image(State(_st): State<AppState>, Json(req): Json<PullReq>) -
                 Err(e) => {
                     ok = false;
                     last_err = Some(e.to_string());
-                    eprintln!("docker pull error source={} err={}", src_name, last_err.as_deref().unwrap_or(""));
                     break;
                 }
             }
         }
         if ok {
             used = source;
-            if let Some(ref src) = used {
-                eprintln!("docker pull success source={}", src);
-            } else {
-                eprintln!("docker pull success source=docker.io");
-            }
             break;
         }
     }
@@ -272,11 +313,13 @@ pub async fn pull_image(State(_st): State<AppState>, Json(req): Json<PullReq>) -
         Some(src) => Json(serde_json::json!({ "ok": true, "source": src })).into_response(),
         None => {
             if has_host {
-                eprintln!("docker pull success source={}", original);
                 Json(serde_json::json!({ "ok": true, "source": original })).into_response()
             } else {
-                eprintln!("docker pull failed err={}", last_err.as_deref().unwrap_or(""));
-                (StatusCode::INTERNAL_SERVER_ERROR, last_err.unwrap_or_else(|| "pull failed".to_string())).into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    last_err.unwrap_or_else(|| "pull failed".to_string()),
+                )
+                    .into_response()
             }
         }
     }
