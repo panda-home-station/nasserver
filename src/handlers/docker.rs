@@ -5,10 +5,11 @@ use axum::{
     Json,
 };
 use bollard::container::{
-    ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions,
+    Config, CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions,
     StopContainerOptions,
 };
-use bollard::image::{CreateImageOptions, ListImagesOptions};
+use bollard::models::{HostConfig, PortBinding};
+use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use bollard::Docker;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,7 @@ pub struct ImageInfo {
     repo_tags: Vec<String>,
     size: i64,
     created: i64,
+    exposed_ports: Vec<u16>,
 }
 
 pub async fn list_containers(State(_st): State<AppState>) -> impl IntoResponse {
@@ -132,15 +134,28 @@ pub async fn list_images(State(_st): State<AppState>) -> impl IntoResponse {
         .await;
     match res {
         Ok(list) => {
-            let items: Vec<ImageInfo> = list
-                .into_iter()
-                .map(|img| ImageInfo {
+            let mut items: Vec<ImageInfo> = Vec::new();
+            for img in list {
+                let exposed_ports = if let Ok(inspect) = docker.inspect_image(&img.id).await {
+                    inspect.config
+                        .and_then(|config| config.exposed_ports)
+                        .map(|ports| {
+                            ports.keys()
+                                .filter_map(|k| k.split('/').next()?.parse::<u16>().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                items.push(ImageInfo {
                     id: img.id,
                     repo_tags: img.repo_tags,
                     size: img.size,
                     created: img.created,
-                })
-                .collect();
+                    exposed_ports,
+                });
+            }
             Json(items).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -322,5 +337,110 @@ pub async fn pull_image(State(st): State<AppState>, Json(req): Json<PullReq>) ->
                     .into_response()
             }
         }
+    }
+}
+
+pub async fn remove_image(State(_st): State<AppState>, Json(req): Json<IdReq>) -> impl IntoResponse {
+    let docker = docker_client();
+    let res = docker
+        .remove_image(
+            &req.id,
+            Some(RemoveImageOptions {
+                force: true,
+                ..Default::default()
+            }),
+            None,
+        )
+        .await;
+    match res {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateContainerReq {
+    image_id: String,
+    name: Option<String>,
+    cpu_limit: Option<f64>,
+    memory_limit: Option<i64>,
+    auto_start: Option<bool>,
+    ports: Option<Vec<PortMapping>>,
+    volumes: Option<Vec<String>>,
+    env: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct PortMapping {
+    host: String,
+    container: String,
+}
+
+pub async fn create_container(State(_st): State<AppState>, Json(req): Json<CreateContainerReq>) -> impl IntoResponse {
+    let docker = docker_client();
+    
+    let mut host_config = HostConfig {
+        ..Default::default()
+    };
+    
+    if let Some(cpu) = req.cpu_limit {
+        host_config.nano_cpus = Some((cpu * 1_000_000_000.0) as i64);
+    }
+    
+    if let Some(mem) = req.memory_limit {
+        host_config.memory = Some(mem * 1024 * 1024 * 1024);
+    }
+    
+    let mut exposed_ports = std::collections::HashMap::new();
+    if let Some(ports) = req.ports {
+        let mut port_bindings = std::collections::HashMap::new();
+        for p in ports {
+            let key = format!("{}/tcp", p.container);
+            let bindings = vec![bollard::models::PortBinding {
+                host_ip: None,
+                host_port: Some(p.host),
+            }];
+            port_bindings.insert(key.clone(), Some(bindings));
+            exposed_ports.insert(key, std::collections::HashMap::new());
+        }
+        host_config.port_bindings = Some(port_bindings);
+    }
+    
+    if let Some(volumes) = req.volumes {
+        host_config.binds = Some(volumes);
+    }
+    
+    let mut config = Config {
+        image: Some(req.image_id),
+        host_config: Some(host_config),
+        ..Default::default()
+    };
+    
+    if !exposed_ports.is_empty() {
+        config.exposed_ports = Some(exposed_ports);
+    }
+    
+    if let Some(env) = req.env {
+        config.env = Some(env);
+    }
+    
+    let options: Option<CreateContainerOptions<String>> = if let Some(name) = req.name {
+        Some(CreateContainerOptions {
+            name,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+    
+    let res = docker.create_container(options, config).await;
+    
+    match res {
+        Ok(info) => {
+            let id = info.id;
+            let _ = docker.start_container(&id, None::<StartContainerOptions<String>>).await;
+            Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
