@@ -50,6 +50,7 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/tasks", post(crate::handlers::task::create_task))
         .route("/api/tasks/:id", post(crate::handlers::task::update_task))
         .route("/api/tasks/clear", post(crate::handlers::task::clear_completed_tasks))
+        .route("/api/agent/chat", post(crate::handlers::agent::chat))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 

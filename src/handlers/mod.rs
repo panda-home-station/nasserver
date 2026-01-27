@@ -1,8 +1,10 @@
+pub mod agent;
 pub mod auth;
-pub mod system;
 pub mod device;
-pub mod docker;
-pub mod task;
-pub mod docs;
-pub mod user;
 pub mod docker_registry;
+pub mod docker;
+pub mod docs;
+pub mod podman;
+pub mod system;
+pub mod task;
+pub mod user;
