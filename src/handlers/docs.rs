@@ -18,7 +18,7 @@ use crate::models::docs::{DocsListQuery, DocsListResp, DocsEntry, DocsMkdirReq, 
 
 
 
-fn normalize_path(p: &str) -> String {
+pub fn normalize_path(p: &str) -> String {
     let s = if p.starts_with('/') { &p[1..] } else { p };
     let s = s.replace("\\", "/");
     let parts: Vec<&str> = s.split('/').filter(|x| !x.is_empty() && *x != "." && *x != "..").collect();
@@ -36,7 +36,7 @@ async fn check_app_access(db: &sqlx::SqlitePool, username: &str, app_name: &str)
     count > 0
 }
 
-async fn resolve_path(state: &AppState, username: &str, virtual_path: &str) -> Result<PathBuf, String> {
+pub async fn resolve_path(state: &AppState, username: &str, virtual_path: &str) -> Result<PathBuf, String> {
     let clean_path = normalize_path(virtual_path);
     if clean_path.starts_with("/AppData/") {
         let parts: Vec<&str> = clean_path.split('/').filter(|x| !x.is_empty()).collect();
