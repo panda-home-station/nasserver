@@ -53,6 +53,10 @@ async fn main() {
     let db = match SqlitePoolOptions::new().max_connections(1).connect(&db_url).await {
         Ok(pool) => {
             println!("Database connected successfully: {}", db_url);
+            // Enable WAL mode for better concurrency
+            let _ = sqlx::query("PRAGMA journal_mode=WAL;")
+                .execute(&pool)
+                .await;
             pool
         },
         Err(e) => {

@@ -256,16 +256,48 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
             }
             
             // Finished
-            let id = uuid::Uuid::new_v4().to_string();
             let parent = normalize_path(&dest_path);
-            let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage) values ($1, $2, $3, $4, $5, '', 'file')")
-                .bind(&id)
-                .bind(user.user_id.to_string())
-                .bind(&file_name)
+            let uid = user.user_id.to_string();
+
+            // Check if exists
+            let exists = sqlx::query_as::<_, (String,)>("select id from cloud_files where user_id=$1 and dir=$2 and name=$3")
+                .bind(&uid)
                 .bind(&parent)
-                .bind(current_size as i64)
-                .execute(&state.db)
+                .bind(&file_name)
+                .fetch_optional(&state.db)
                 .await;
+
+            match exists {
+                Ok(Some((existing_id,))) => {
+                    // Update
+                    if let Err(e) = sqlx::query("update cloud_files set size=$1, updated_at=CURRENT_TIMESTAMP where id=$2")
+                        .bind(current_size as i64)
+                        .bind(&existing_id)
+                        .execute(&state.db)
+                        .await 
+                    {
+                        println!("Failed to update cloud_files for {}: {}", file_name, e);
+                    }
+                },
+                Ok(None) => {
+                    // Insert
+                    let id = uuid::Uuid::new_v4().to_string();
+                    if let Err(e) = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage) values ($1, $2, $3, $4, $5, '', 'file')")
+                        .bind(&id)
+                        .bind(&uid)
+                        .bind(&file_name)
+                        .bind(&parent)
+                        .bind(current_size as i64)
+                        .execute(&state.db)
+                        .await
+                    {
+                        println!("Failed to insert cloud_files for {}: {}", file_name, e);
+                    }
+                },
+                Err(e) => {
+                     println!("Failed to check existence for {}: {}", file_name, e);
+                }
+            }
 
             return Json(serde_json::json!({ "ok": true, "done": true, "bytes": current_size }));
         }
