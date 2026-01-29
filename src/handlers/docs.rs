@@ -16,13 +16,7 @@ use crate::state::AppState;
 use crate::models::auth::AuthUser;
 use crate::models::docs::{DocsListQuery, DocsListResp, DocsEntry, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery};
 
-#[derive(Deserialize)]
-pub struct RapidUploadReq {
-    pub path: String,
-    pub name: String,
-    pub size: i64,
-    pub checksum: Option<String>,
-}
+
 
 fn normalize_path(p: &str) -> String {
     let s = if p.starts_with('/') { &p[1..] } else { p };
@@ -277,10 +271,6 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
         }
     }
     Json(serde_json::json!({ "ok": false }))
-}
-
-pub async fn rapid_upload(State(_state): State<AppState>, Extension(_user): Extension<AuthUser>, Json(_req): Json<RapidUploadReq>) -> impl IntoResponse {
-    Json(serde_json::json!({ "ok": true, "rapid": false }))
 }
 
 pub async fn download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<DocsDownloadQuery>) -> Response {

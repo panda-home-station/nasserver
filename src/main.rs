@@ -147,7 +147,7 @@ async fn main() {
             size integer default 0,
             mime text,
             checksum text,
-            storage text not null default 'blob',
+            storage text not null default 'file',
             created_at timestamp default CURRENT_TIMESTAMP,
             updated_at timestamp default CURRENT_TIMESTAMP
         )",
@@ -168,15 +168,7 @@ async fn main() {
         .execute(&db)
         .await
         .expect("Failed to create idx_cloud_files_checksum");
-    sqlx::query(
-        "create table if not exists cloud_blobs (
-            file_id text primary key,
-            data BLOB
-        )",
-    )
-    .execute(&db)
-    .await
-    .expect("Failed to create cloud_blobs table");
+
 
     sqlx::query(
         "create table if not exists app_permissions (
@@ -259,31 +251,16 @@ async fn main() {
     // Spawn background task to purge trash older than 30 days
     {
         let db = state.db.clone();
-        let storage_root = state.storage_path.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(24 * 3600)).await;
-                let rows = sqlx::query("select id, storage, checksum from cloud_files where dir like '/Trash%' and updated_at < datetime('now', '-30 day')")
+                let rows = sqlx::query("select id from cloud_files where dir like '/Trash%' and updated_at < datetime('now', '-30 day')")
                     .fetch_all(&db)
                     .await
                     .unwrap_or_default();
                 for row in rows {
                     let id: String = row.try_get("id").unwrap_or_default();
-                    let storage: String = row.try_get("storage").unwrap_or_default();
-                    let checksum: String = row.try_get("checksum").unwrap_or_default();
                     let _ = sqlx::query("delete from cloud_files where id = $1").bind(&id).execute(&db).await;
-                    if storage == "blob" && !checksum.is_empty() {
-                        let cnt: i64 = sqlx::query_scalar("select count(*) from cloud_files where checksum = $1")
-                            .bind(&checksum)
-                            .fetch_one(&db)
-                            .await
-                            .unwrap_or(1);
-                        if cnt == 0 {
-                            // Blob cleanup disabled or path outdated
-                            // let blobs_root = std::path::Path::new(&storage_root).join("vol1").join("blobs");
-                            // let _ = std::fs::remove_file(blobs_root.join(&checksum));
-                        }
-                    }
                 }
             }
         });
