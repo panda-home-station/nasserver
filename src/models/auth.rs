@@ -27,10 +27,12 @@ pub struct LoginResp {
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
+    pub name: String,
     pub exp: usize,
 }
 
 #[derive(Clone)]
 pub struct AuthUser {
     pub user_id: Uuid,
+    pub username: String,
 }

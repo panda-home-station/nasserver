@@ -35,7 +35,7 @@ pub async fn signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> i
             .execute(&st.db)
             .await;
         // create per-user storage root
-        let user_root = Path::new(&st.storage_path).join(&req.username);
+        let user_root = Path::new(&st.storage_path).join("vol1").join("User").join(&req.username);
         let _ = std::fs::create_dir_all(&user_root);
         uid
     };
@@ -61,6 +61,7 @@ pub async fn auth_login(State(st): State<AppState>, Json(req): Json<LoginReq>) -
             let exp = (Utc::now() + Duration::days(7)).timestamp() as usize;
             let claims = Claims {
                 sub: uid.to_string(),
+                name: _username.clone(),
                 exp,
             };
             let token = encode(

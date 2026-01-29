@@ -24,15 +24,30 @@ async fn main() {
         .unwrap_or_else(|_| "/var/panda/system".to_string());
     let _ = std::fs::create_dir_all(&storage_path);
     let _ = std::fs::create_dir_all(format!("{}/vol1", &storage_path));
-    let _ = std::fs::create_dir_all(format!("{}/vol1/user", &storage_path));
-    let _ = std::fs::create_dir_all(format!("{}/vol1/apps", &storage_path));
-    let _ = std::fs::create_dir_all(format!("{}/vol1/blobs", &storage_path));
+    let _ = std::fs::create_dir_all(format!("{}/vol1/User", &storage_path));
+    let _ = std::fs::create_dir_all(format!("{}/vol1/AppData", &storage_path));
 
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+    let mut db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         let db_dir = format!("{}/db", storage_path);
         let _ = std::fs::create_dir_all(&db_dir);
-        format!("sqlite:{}/pnas.db", db_dir)
+        format!("sqlite://{}/pnas.db", db_dir)
     });
+    // Normalize sqlite absolute path URLs: ensure "sqlite:///" for absolute paths
+    if db_url.starts_with("sqlite:/") && !db_url.starts_with("sqlite:///") {
+        let fixed = db_url.replacen("sqlite:/", "sqlite:///", 1);
+        println!("Adjusted DATABASE_URL to {}", fixed);
+        db_url = fixed;
+    }
+    // Proactively create DB file if missing to avoid SQLITE_CANTOPEN (code 14)
+    if let Some(path) = db_url.strip_prefix("sqlite://") {
+        let db_path = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
+        if let Some(parent) = std::path::Path::new(&db_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if !std::path::Path::new(&db_path).exists() {
+            let _ = std::fs::File::create(&db_path);
+        }
+    }
     
     // Try to connect to database directly for better error handling
     let db = match SqlitePoolOptions::new().max_connections(1).connect(&db_url).await {
@@ -163,6 +178,26 @@ async fn main() {
     .await
     .expect("Failed to create cloud_blobs table");
 
+    sqlx::query(
+        "create table if not exists app_permissions (
+            id integer primary key autoincrement,
+            app_name text not null,
+            username text not null,
+            created_at timestamp default CURRENT_TIMESTAMP,
+            unique(app_name, username)
+        )",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create app_permissions table");
+    println!("App permissions table created/verified");
+
+    // Seed default permissions for jellyfin
+    let _ = sqlx::query("insert or ignore into app_permissions (app_name, username) values ('jellyfin', 'zac')")
+        .execute(&db)
+        .await;
+    println!("Seeded default app permissions");
+
     // Initialize system info components
     // We use System::new() to avoid loading all processes which is slow
     let mut sys = System::new();
@@ -244,8 +279,9 @@ async fn main() {
                             .await
                             .unwrap_or(1);
                         if cnt == 0 {
-                            let blobs_root = std::path::Path::new(&storage_root).join("vol1").join("blobs");
-                            let _ = std::fs::remove_file(blobs_root.join(&checksum));
+                            // Blob cleanup disabled or path outdated
+                            // let blobs_root = std::path::Path::new(&storage_root).join("vol1").join("blobs");
+                            // let _ = std::fs::remove_file(blobs_root.join(&checksum));
                         }
                     }
                 }

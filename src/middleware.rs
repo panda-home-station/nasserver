@@ -31,7 +31,7 @@ pub async fn require_auth(State(st): State<AppState>, mut req: Request, next: Ne
     }
     if token.is_empty() {
         if std::env::var("ALLOW_INSECURE_AUTH").ok().as_deref() == Some("1") {
-            req.extensions_mut().insert(AuthUser { user_id: Uuid::nil() });
+            req.extensions_mut().insert(AuthUser { user_id: Uuid::nil(), username: "dev".to_string() });
             return Ok(next.run(req).await);
         }
         println!("Auth failed: missing token for {}", req.uri().path());
@@ -40,7 +40,7 @@ pub async fn require_auth(State(st): State<AppState>, mut req: Request, next: Ne
     // Dev-only bypass: allow raw UUID tokens when ALLOW_INSECURE_AUTH=1
     if std::env::var("ALLOW_INSECURE_AUTH").ok().as_deref() == Some("1") {
         if let Ok(uid) = Uuid::parse_str(token.as_str()) {
-            req.extensions_mut().insert(AuthUser { user_id: uid });
+            req.extensions_mut().insert(AuthUser { user_id: uid, username: "dev".to_string() });
             return Ok(next.run(req).await);
         }
     }
@@ -51,6 +51,6 @@ pub async fn require_auth(State(st): State<AppState>, mut req: Request, next: Ne
     )
     .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let uid = Uuid::parse_str(&data.claims.sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    req.extensions_mut().insert(AuthUser { user_id: uid });
+    req.extensions_mut().insert(AuthUser { user_id: uid, username: data.claims.name });
     Ok(next.run(req).await)
 }
