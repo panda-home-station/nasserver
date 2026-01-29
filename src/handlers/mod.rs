@@ -8,3 +8,4 @@ pub mod podman;
 pub mod system;
 pub mod task;
 pub mod user;
+pub mod downloader;

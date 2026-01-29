@@ -18,5 +18,6 @@ pub struct AppState {
     pub disks: Arc<Mutex<Disks>>,
     pub networks: Arc<Mutex<Networks>>,
     pub components: Arc<Mutex<Components>>,
+    pub download_tasks: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
 }
 

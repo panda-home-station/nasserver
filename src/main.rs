@@ -141,6 +141,29 @@ async fn main() {
     .await
     .expect("Failed to create file_tasks table");
     println!("File tasks table created/verified");
+
+    // Create downloads table
+    println!("Creating downloads table...");
+    sqlx::query(
+        "create table if not exists downloads (
+            id text primary key,
+            url text not null,
+            path text not null,
+            filename text not null,
+            status text not null,
+            progress real default 0,
+            total_bytes integer default 0,
+            downloaded_bytes integer default 0,
+            speed integer default 0,
+            created_at timestamp default CURRENT_TIMESTAMP,
+            updated_at timestamp default CURRENT_TIMESTAMP,
+            error_msg text
+        )"
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create downloads table");
+    println!("Downloads table created/verified");
     
     sqlx::query(
         "create table if not exists cloud_files (
@@ -215,6 +238,7 @@ async fn main() {
         disks: Arc::new(Mutex::new(disks)),
         networks: Arc::new(Mutex::new(networks)),
         components: Arc::new(Mutex::new(components)),
+        download_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let api = routes::api_app(state.clone());
