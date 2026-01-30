@@ -15,6 +15,31 @@ use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyRespon
 use librqbit::dht::Id20;
 use std::str::FromStr;
 
+const DEFAULT_TRACKERS: &[&str] = &[
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://9.rarbg.com:2810/announce",
+    "udp://p4p.arenabg.com:1337/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.tiny-vps.com:6969/announce",
+    "udp://tracker.moeking.me:6969/announce",
+    "https://opentracker.i2p.rocks/announce",
+];
+
+fn enrich_magnet_link(url: &str) -> String {
+    if !url.starts_with("magnet:?") {
+        return url.to_string();
+    }
+    let mut new_url = url.to_string();
+    for tracker in DEFAULT_TRACKERS {
+        let encoded = urlencoding::encode(tracker);
+        if !new_url.contains(&*encoded) {
+            new_url.push_str(&format!("&tr={}", encoded));
+        }
+    }
+    new_url
+}
+
 #[derive(Serialize)]
 pub struct SubTaskResp {
     pub filename: String,
@@ -170,7 +195,10 @@ pub async fn list_downloads(State(state): State<AppState>) -> impl IntoResponse 
 pub async fn create_download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(payload): Json<CreateDownloadReq>) -> impl IntoResponse {
     let id = uuid::Uuid::new_v4().to_string();
     // Clean URL: remove leading/trailing whitespace and common punctuation from copy-pasting
-    let url = payload.url.trim().trim_end_matches([',', ';', ' ']).to_string();
+    let mut url = payload.url.trim().trim_end_matches([',', ';', ' ']).to_string();
+    
+    // Enrich magnet link with trackers
+    url = enrich_magnet_link(&url);
     
     // Magnet link handling
     if url.starts_with("magnet:?") {
@@ -309,12 +337,13 @@ pub async fn create_download(State(state): State<AppState>, Extension(user): Ext
 }
 
 pub async fn resolve_magnet(State(state): State<AppState>, Json(payload): Json<ResolveMagnetReq>) -> impl IntoResponse {
+    let magnet_url = enrich_magnet_link(&payload.magnet_url);
     let opts = AddTorrentOptions {
         list_only: true,
         ..Default::default()
     };
     
-    let add_result = state.torrent_session.add_torrent(AddTorrent::from_url(payload.magnet_url), Some(opts)).await;
+    let add_result = state.torrent_session.add_torrent(AddTorrent::from_url(magnet_url), Some(opts)).await;
     
     match add_result {
         Ok(AddTorrentResponse::ListOnly(resp)) => {
@@ -411,14 +440,15 @@ pub async fn start_magnet_download(State(state): State<AppState>, Extension(user
         ..Default::default()
     };
     
-    // Add torrent using bytes
-    println!("Adding torrent to path: {}", save_dir);
-    match state.torrent_session.add_torrent(AddTorrent::TorrentFileBytes(torrent_bytes), Some(opts)).await {
+    // Add torrent using URL to ensure trackers are used
+    let magnet_url = enrich_magnet_link(&format!("magnet:?xt=urn:btih:{}", payload.token));
+    println!("Adding torrent to path: {} with url: {}", save_dir, magnet_url);
+    
+    match state.torrent_session.add_torrent(AddTorrent::from_url(magnet_url.clone()), Some(opts)).await {
         Ok(resp) => {
             if let Some(handle) = resp.into_handle() {
                 // Get torrent name if possible (using placeholder if API access fails)
                 let torrent_name = handle.name().unwrap_or_else(|| torrent_name.clone());
-                let magnet_url = format!("magnet:?xt=urn:btih:{}", payload.token);
 
                  let task = DownloadTask {
                     id: id.clone(),
@@ -521,6 +551,7 @@ async fn monitor_torrent_process(state: AppState, id: String, handle: std::sync:
 }
 
 async fn download_magnet_process(state: AppState, id: String, url: String, save_dir: String) {
+    let url = enrich_magnet_link(&url);
     println!("[Downloader] Magnet process started for id={}", id);
 
     let opts = AddTorrentOptions {

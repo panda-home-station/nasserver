@@ -231,7 +231,14 @@ async fn main() {
     
     let torrent_dir = format!("{}/torrents", storage_path);
     let _ = std::fs::create_dir_all(&torrent_dir);
-    let session = librqbit::Session::new(torrent_dir.into()).await.expect("Failed to init torrent session");
+    
+    // Enable listener and UPnP for better connectivity
+    let mut session_opts = librqbit::SessionOptions::default();
+    let mut listener_opts = librqbit::ListenerOptions::default();
+    listener_opts.enable_upnp_port_forwarding = true;
+    session_opts.listen = Some(listener_opts);
+    
+    let session = librqbit::Session::new_with_opts(torrent_dir.into(), session_opts).await.expect("Failed to init torrent session");
 
     let state = AppState {
         device_codes: &DEVICE_CODES,
