@@ -27,3 +27,29 @@ pub struct CreateDownloadReq {
 pub struct ControlDownloadReq {
     pub action: String, // pause, resume, delete
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveMagnetReq {
+    pub magnet_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TorrentFileMetadata {
+    pub index: usize,
+    pub name: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResolveMagnetResp {
+    pub token: String, // info_hash or unique id to retrieve cached metadata
+    pub files: Vec<TorrentFileMetadata>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartMagnetDownloadReq {
+    pub token: String,
+    pub files: Vec<usize>, // indices of files to download
+    pub path: Option<String>,
+}

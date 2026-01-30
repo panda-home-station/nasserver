@@ -33,3 +33,5 @@ libc = "0.2"
 hyper = { version = "0.14", features = ["client"] }
 hyperlocal = "0.8"
 bytes = "1.11.0"
+librqbit = { path = "../vendor/rqbit/crates/librqbit" }
+librqbit-core = { path = "../vendor/rqbit/crates/librqbit_core" }

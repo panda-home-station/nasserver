@@ -229,6 +229,10 @@ async fn main() {
 
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
     
+    let torrent_dir = format!("{}/torrents", storage_path);
+    let _ = std::fs::create_dir_all(&torrent_dir);
+    let session = librqbit::Session::new(torrent_dir.into()).await.expect("Failed to init torrent session");
+
     let state = AppState {
         device_codes: &DEVICE_CODES,
         db,
@@ -239,6 +243,8 @@ async fn main() {
         networks: Arc::new(Mutex::new(networks)),
         components: Arc::new(Mutex::new(components)),
         download_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        torrent_session: session,
+        magnet_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let api = routes::api_app(state.clone());

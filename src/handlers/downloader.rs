@@ -4,19 +4,34 @@ use axum::{
     http::StatusCode,
 };
 use crate::state::AppState;
-use crate::models::downloader::{DownloadTask, CreateDownloadReq, ControlDownloadReq};
+use crate::models::downloader::{DownloadTask, CreateDownloadReq, ControlDownloadReq, ResolveMagnetReq, ResolveMagnetResp, StartMagnetDownloadReq, TorrentFileMetadata};
 use crate::models::auth::AuthUser;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use std::time::Instant;
 use crate::handlers::docs::{resolve_path, normalize_path};
 use serde::Serialize;
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, ManagedTorrent, Api};
+use librqbit::dht::Id20;
+use std::str::FromStr;
+
+#[derive(Serialize)]
+pub struct SubTaskResp {
+    pub filename: String,
+    pub progress: f64,
+    pub total_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub speed: u64,
+    pub status: String,
+}
 
 #[derive(Serialize)]
 struct DownloadTaskResp {
     #[serde(flatten)]
     task: DownloadTask,
     virtual_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub_tasks: Option<Vec<SubTaskResp>>,
 }
 
 fn get_virtual_path(path: &str, storage_path: &str) -> String {
@@ -51,38 +66,7 @@ fn get_virtual_path(path: &str, storage_path: &str) -> String {
     "/".to_string()
 }
 
-fn extract_info_from_path(path: &str, storage_path: &str) -> Option<(String, String)> {
-    if !path.starts_with(storage_path) {
-        return None;
-    }
-    let rel = &path[storage_path.len()..];
-    let parts: Vec<&str> = rel.split('/').filter(|x| !x.is_empty()).collect();
-    
-    // Expect: vol1/User/<username>/...
-    if parts.len() >= 3 && parts[0] == "vol1" && parts[1] == "User" {
-        let username = parts[2].to_string();
-        
-        // Virtual dir is the directory containing the file
-        // e.g. path = .../vol1/User/zac/Downloads/foo.zip
-        // rel = /vol1/User/zac/Downloads/foo.zip
-        // parts = ["vol1", "User", "zac", "Downloads", "foo.zip"]
-        // we want "/Downloads"
-        
-        if parts.len() > 3 {
-             let dir_parts = &parts[3..parts.len()-1];
-             let virtual_dir = if dir_parts.is_empty() {
-                 "/".to_string()
-             } else {
-                 format!("/{}", dir_parts.join("/"))
-             };
-             return Some((username, virtual_dir));
-        } else {
-             // File in root?
-             return Some((username, "/".to_string()));
-        }
-    }
-    None
- }
+
  
  async fn ensure_directory_exists(state: &AppState, user_id: &str, virtual_dir: &str) {
     if virtual_dir == "/" { return; }
@@ -124,27 +108,63 @@ fn extract_info_from_path(path: &str, storage_path: &str) -> Option<(String, Str
     }
 }
 
- pub async fn list_downloads(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn list_downloads(State(state): State<AppState>) -> impl IntoResponse {
     let tasks = sqlx::query_as::<_, DownloadTask>("select * from downloads order by created_at desc")
         .fetch_all(&state.db)
-        .await;
+        .await
+        .unwrap_or(vec![]);
 
-    match tasks {
-        Ok(t) => {
-            let storage_path = state.storage_path.clone();
-            let resps: Vec<DownloadTaskResp> = t.into_iter().map(|task| {
-                let p = task.path.clone();
-                let dir_path = std::path::Path::new(&p).parent().unwrap_or(std::path::Path::new("/")).to_str().unwrap_or("/");
-                let virtual_path = get_virtual_path(dir_path, &storage_path);
-                DownloadTaskResp {
-                    task,
-                    virtual_path
+    let mut resp_tasks = Vec::new();
+    let storage_path = state.storage_path.clone();
+    let api = Api::new(state.torrent_session.clone(), None);
+
+    for task in tasks {
+        let virtual_path = get_virtual_path(&task.path, &storage_path);
+        let mut sub_tasks = None;
+
+        if task.url.starts_with("magnet:?xt=urn:btih:") {
+            if let Some(hash_str) = task.url.strip_prefix("magnet:?xt=urn:btih:") {
+                let hash_clean = hash_str.split('&').next().unwrap_or(hash_str);
+                
+                if let Ok(id) = Id20::from_str(hash_clean) {
+                    if let Ok(details) = api.api_torrent_details(librqbit::api::TorrentIdOrHash::Hash(id)) {
+                         if let Some(files) = details.files {
+                             let mut subs = Vec::new();
+                             for (idx, file) in files.iter().enumerate() {
+                                 let size = file.length;
+                                 let downloaded = file.bytes_downloaded;
+                                 let speed = file.download_speed;
+                                 
+                                 let progress = if size > 0 {
+                                     (downloaded as f64 / size as f64) * 100.0
+                                 } else {
+                                     0.0
+                                 };
+                                 
+                                 subs.push(SubTaskResp {
+                                     filename: file.name.clone(),
+                                     progress,
+                                     total_bytes: size,
+                                     downloaded_bytes: downloaded,
+                                     speed,
+                                     status: task.status.clone(),
+                                 });
+                             }
+                             sub_tasks = Some(subs);
+                         }
+                    }
                 }
-            }).collect();
-            Json(resps).into_response()
-        },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
+
+        resp_tasks.push(DownloadTaskResp {
+            task,
+            virtual_path,
+            sub_tasks
+        });
     }
+
+    Json(resp_tasks)
 }
 
 pub async fn create_download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(payload): Json<CreateDownloadReq>) -> impl IntoResponse {
@@ -159,19 +179,26 @@ pub async fn create_download(State(state): State<AppState>, Extension(user): Ext
             .map(|p| urlencoding::decode(&p[3..]).unwrap_or_default().to_string())
             .unwrap_or_else(|| "magnet_download".to_string());
             
+        let storage_path = state.storage_path.clone();
+        let save_dir = format!("{}/vol1/User/{}/下载", storage_path, user.username);
+        let _ = tokio::fs::create_dir_all(&save_dir).await;
+        
+        // Proactively ensure the download directory exists in the database
+        ensure_directory_exists(&state, &user.user_id.to_string(), "/下载").await;
+
         let task = DownloadTask {
             id: id.clone(),
             url: url.clone(),
-            path: "".to_string(),
+            path: save_dir.clone(),
             filename: filename.clone(),
-            status: "error".to_string(),
+            status: "pending".to_string(),
             progress: 0.0,
             total_bytes: 0,
             downloaded_bytes: 0,
             speed: 0,
             created_at: chrono::Utc::now().naive_utc(),
             updated_at: chrono::Utc::now().naive_utc(),
-            error_msg: Some("Magnet support requires 'librqbit' crate. Please add it to Cargo.toml.".to_string()),
+            error_msg: None,
         };
 
         let _ = sqlx::query(
@@ -192,6 +219,19 @@ pub async fn create_download(State(state): State<AppState>, Extension(user): Ext
         .bind(&task.error_msg)
         .execute(&state.db)
         .await;
+
+        let state_clone = state.clone();
+        let id_clone = id.clone();
+        let url_clone = url.clone();
+        let save_dir_clone = save_dir.clone();
+
+        let handle = tokio::spawn(async move {
+            download_magnet_process(state_clone, id_clone, url_clone, save_dir_clone).await;
+        });
+
+        if let Ok(mut tasks) = state.download_tasks.lock() {
+            tasks.insert(id.clone(), handle.abort_handle());
+        }
 
         return Json(task).into_response();
     }
@@ -268,6 +308,243 @@ pub async fn create_download(State(state): State<AppState>, Extension(user): Ext
     Json(task).into_response()
 }
 
+pub async fn resolve_magnet(State(state): State<AppState>, Json(payload): Json<ResolveMagnetReq>) -> impl IntoResponse {
+    let opts = AddTorrentOptions {
+        list_only: true,
+        ..Default::default()
+    };
+    
+    let add_result = state.torrent_session.add_torrent(AddTorrent::from_url(payload.magnet_url), Some(opts)).await;
+    
+    match add_result {
+        Ok(AddTorrentResponse::ListOnly(resp)) => {
+            let info_hash = resp.info_hash.as_string();
+            let mut files = Vec::new();
+            
+            for (idx, fd) in resp.info.iter_file_details().enumerate() {
+                files.push(TorrentFileMetadata {
+                    index: idx,
+                    name: fd.filename.to_string(),
+                    size: fd.len,
+                });
+            }
+
+            let name = resp.info.name().map(|n| n.into_owned());
+            
+            // Cache the torrent bytes
+            if let Ok(mut cache) = state.magnet_cache.lock() {
+                cache.insert(info_hash.clone(), resp.torrent_bytes);
+            }
+            
+            Json(ResolveMagnetResp {
+                token: info_hash,
+                files,
+                name,
+            }).into_response()
+        },
+        Ok(_) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Unexpected response from torrent engine (not ListOnly)".to_string()).into_response()
+        },
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to resolve magnet: {}", e)).into_response()
+        }
+    }
+}
+
+use librqbit_core::torrent_metainfo::torrent_from_bytes;
+
+pub async fn start_magnet_download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(payload): Json<StartMagnetDownloadReq>) -> impl IntoResponse {
+    let torrent_bytes = {
+        let cache = state.magnet_cache.lock().unwrap();
+        match cache.get(&payload.token) {
+            Some(b) => b.clone(),
+            None => return (StatusCode::BAD_REQUEST, "Token expired or invalid".to_string()).into_response(),
+        }
+    };
+    
+    // Parse torrent metadata to determine name and structure
+    let meta_result = torrent_from_bytes(&torrent_bytes);
+    let (torrent_name, is_single_file) = match meta_result {
+        Ok(meta) => {
+            // meta.info is WithRawBytes, we need to access the inner data
+            match meta.info.data.validate() {
+                Ok(info) => {
+                    let name = info.name().map(|n| n.into_owned()).unwrap_or_else(|| "magnet_download".to_string());
+                    let is_single = info.info().length.is_some();
+                    (name, is_single)
+                },
+                Err(_) => ("magnet_download".to_string(), false)
+            }
+        },
+        Err(_) => ("magnet_download".to_string(), false)
+    };
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let storage_path = state.storage_path.clone();
+    
+    // Determine save directory
+    let base_save_dir = if let Some(p) = payload.path {
+        // Handle virtual path: remove leading slash if present
+        let relative_path = p.trim_start_matches('/');
+        // Construct full physical path
+        format!("{}/vol1/User/{}/{}", storage_path, user.username, relative_path)
+    } else {
+        let default_dir = format!("{}/vol1/User/{}/下载", storage_path, user.username);
+        ensure_directory_exists(&state, &user.user_id.to_string(), "/下载").await;
+        default_dir
+    };
+
+    // If multi-file, append torrent name to base directory to create a dedicated folder
+    // If single-file, save directly to base directory (filename will be appended by torrent engine)
+    let save_dir = if !is_single_file {
+        format!("{}/{}", base_save_dir, torrent_name)
+    } else {
+        base_save_dir
+    };
+
+    let _ = tokio::fs::create_dir_all(&save_dir).await;
+    
+    let opts = AddTorrentOptions {
+        output_folder: Some(save_dir.clone()),
+        only_files: Some(payload.files),
+        overwrite: true,
+        ..Default::default()
+    };
+    
+    // Add torrent using bytes
+    println!("Adding torrent to path: {}", save_dir);
+    match state.torrent_session.add_torrent(AddTorrent::TorrentFileBytes(torrent_bytes), Some(opts)).await {
+        Ok(resp) => {
+            if let Some(handle) = resp.into_handle() {
+                // Get torrent name if possible (using placeholder if API access fails)
+                let torrent_name = handle.name().unwrap_or_else(|| torrent_name.clone());
+                let magnet_url = format!("magnet:?xt=urn:btih:{}", payload.token);
+
+                 let task = DownloadTask {
+                    id: id.clone(),
+                    url: magnet_url, 
+                    path: save_dir.clone(),
+                    filename: torrent_name, 
+                    status: "downloading".to_string(),
+                    progress: 0.0,
+                    total_bytes: 0,
+                    downloaded_bytes: 0,
+                    speed: 0,
+                    created_at: chrono::Utc::now().naive_utc(),
+                    updated_at: chrono::Utc::now().naive_utc(),
+                    error_msg: None,
+                };
+                
+                // Insert into DB
+                let _ = sqlx::query(
+                    "insert into downloads (id, url, path, filename, status, progress, total_bytes, downloaded_bytes, speed, created_at, updated_at, error_msg) 
+                     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+                )
+                .bind(&task.id)
+                .bind(&task.url)
+                .bind(&task.path)
+                .bind(&task.filename)
+                .bind(&task.status)
+                .bind(&task.progress)
+                .bind(&task.total_bytes)
+                .bind(&task.downloaded_bytes)
+                .bind(&task.speed)
+                .bind(&task.created_at)
+                .bind(&task.updated_at)
+                .bind(&task.error_msg)
+                .execute(&state.db)
+                .await;
+                
+                let state_clone = state.clone();
+                let id_clone = id.clone();
+                
+                let abort_handle = tokio::spawn(async move {
+                    monitor_torrent_process(state_clone, id_clone, handle).await;
+                });
+                
+                if let Ok(mut tasks) = state.download_tasks.lock() {
+                    tasks.insert(id.clone(), abort_handle.abort_handle());
+                }
+                
+                return Json(task).into_response();
+            } else {
+                 println!("Failed to get torrent handle");
+                 (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get torrent handle".to_string()).into_response()
+            }
+        },
+        Err(e) => {
+            println!("Failed to start download: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to start download: {}", e)).into_response()
+        }
+    }
+}
+
+async fn monitor_torrent_process(state: AppState, id: String, handle: std::sync::Arc<ManagedTorrent>) {
+    // Update status to downloading (already done in handler, but good to ensure)
+    let _ = sqlx::query("update downloads set status = 'downloading' where id = $1")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+
+    loop {
+        if handle.stats().finished {
+            break;
+        }
+        
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        
+        let stats = handle.stats();
+        let total_bytes = stats.total_bytes;
+        let downloaded_bytes = stats.progress_bytes; 
+        let progress = if total_bytes > 0 { (downloaded_bytes as f64 / total_bytes as f64) * 100.0 } else { 0.0 };
+        let speed = stats.live.as_ref().map(|l| l.download_speed.as_bytes()).unwrap_or(0);
+        
+        let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = datetime('now') where id = $5")
+            .bind(downloaded_bytes as i64)
+            .bind(speed as i64)
+            .bind(progress)
+            .bind(total_bytes as i64)
+            .bind(&id)
+            .execute(&state.db)
+            .await;
+    }
+    
+    // Done
+    let _ = sqlx::query("update downloads set status = 'done', progress = 100.0, speed = 0, updated_at = datetime('now') where id = $1")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+
+    if let Ok(mut tasks) = state.download_tasks.lock() {
+        tasks.remove(&id);
+    }
+}
+
+async fn download_magnet_process(state: AppState, id: String, url: String, save_dir: String) {
+    println!("[Downloader] Magnet process started for id={}", id);
+
+    let opts = AddTorrentOptions {
+        output_folder: Some(save_dir.clone()),
+        overwrite: true,
+        ..Default::default()
+    };
+
+    let handle = match state.torrent_session.add_torrent(AddTorrent::from_url(url.clone()), Some(opts)).await {
+        Ok(h) => h.into_handle().unwrap(),
+        Err(e) => {
+            println!("[Downloader] Magnet add error: {}", e);
+             let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
+                .bind(e.to_string())
+                .bind(&id)
+                .execute(&state.db)
+                .await;
+            return;
+        }
+    };
+    
+    monitor_torrent_process(state, id, handle).await;
+}
+
 async fn download_process(state: AppState, id: String, url: String, path: String) {
     println!("[Downloader] Process started for id={}", id);
     
@@ -301,7 +578,7 @@ async fn download_process(state: AppState, id: String, url: String, path: String
     }
     
     // Remove Referer header to mimic wget behavior
-    let response = match req.send().await {
+    let mut response = match req.send().await {
         Ok(r) => {
              println!("[Downloader] Response status: {}", r.status());
              println!("[Downloader] Response headers: {:?}", r.headers());
@@ -322,9 +599,10 @@ async fn download_process(state: AppState, id: String, url: String, path: String
              r
         },
         Err(e) => {
-            println!("[Downloader] Request error: {}", e);
+            let msg = format!("Request failed: {}", e);
+            println!("[Downloader] Request failed: {}", e);
             let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
-                .bind(e.to_string())
+                .bind(msg)
                 .bind(&id)
                 .execute(&state.db)
                 .await;
@@ -337,205 +615,173 @@ async fn download_process(state: AppState, id: String, url: String, path: String
     };
 
     let total_size = response.content_length().unwrap_or(0) + downloaded_offset;
-    let is_partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-    
-    // If server returned 200 OK but we asked for range, it means it doesn't support range
-    // So we should reset downloaded_offset to 0 and overwrite file
-    let mut current_offset = if is_partial { downloaded_offset } else { 0 };
-    
-    println!("[Downloader] Total size: {}, Resuming: {}", total_size, is_partial);
+    println!("[Downloader] Total size: {}", total_size);
 
-    // Update total size
-    let _ = sqlx::query("update downloads set total_bytes = $1 where id = $2")
-        .bind(total_size as i64)
-        .bind(&id)
-        .execute(&state.db)
-        .await;
-
-    let file_result = if current_offset > 0 {
-        tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await
+    let mut file = if downloaded_offset > 0 {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap()
     } else {
-        tokio::fs::File::create(&path).await
+        tokio::fs::File::create(&path).await.unwrap()
     };
 
-    let mut file = match file_result {
-        Ok(f) => f,
-        Err(e) => {
-             let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
-                .bind(e.to_string())
-                .bind(&id)
-                .execute(&state.db)
-                .await;
-            if let Ok(mut tasks) = state.download_tasks.lock() {
-                tasks.remove(&id);
-            }
-            return;
-        }
-    };
-
+    let mut downloaded = downloaded_offset;
     let mut last_update = Instant::now();
-    let mut last_downloaded = current_offset;
-    
-    // response needs to be mutable for chunk()
-    let mut response = response;
+    let mut last_downloaded = downloaded;
 
     loop {
         match response.chunk().await {
             Ok(Some(chunk)) => {
                 if let Err(e) = file.write_all(&chunk).await {
-                     let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
-                        .bind(e.to_string())
+                    let msg = format!("Write error: {}", e);
+                    let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
+                        .bind(msg)
                         .bind(&id)
                         .execute(&state.db)
                         .await;
-                    if let Ok(mut tasks) = state.download_tasks.lock() {
-                        tasks.remove(&id);
-                    }
                     return;
                 }
-
-                current_offset += chunk.len() as u64;
+                downloaded += chunk.len() as u64;
 
                 if last_update.elapsed().as_secs() >= 1 {
-                    let speed = (current_offset - last_downloaded) as f64 / last_update.elapsed().as_secs_f64();
-                    let progress = if total_size > 0 {
-                        (current_offset as f64 / total_size as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-
-                    let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, updated_at = datetime('now') where id = $4")
-                        .bind(current_offset as i64)
+                    let speed = (downloaded - last_downloaded) as f64 / last_update.elapsed().as_secs_f64();
+                    let progress = if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 };
+                    
+                    let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = datetime('now') where id = $5")
+                        .bind(downloaded as i64)
                         .bind(speed as i64)
                         .bind(progress)
+                        .bind(total_size as i64)
                         .bind(&id)
                         .execute(&state.db)
                         .await;
-                    
+
                     last_update = Instant::now();
-                    last_downloaded = current_offset;
+                    last_downloaded = downloaded;
                 }
             },
-            Ok(None) => break,
+            Ok(None) => break, // End of stream
             Err(e) => {
+                let msg = format!("Stream error: {}", e);
                 let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
-                    .bind(e.to_string())
+                    .bind(msg)
                     .bind(&id)
                     .execute(&state.db)
                     .await;
-                if let Ok(mut tasks) = state.download_tasks.lock() {
-                    tasks.remove(&id);
-                }
                 return;
             }
         }
     }
 
     // Done
-    let _ = sqlx::query("update downloads set status = 'done', progress = 100.0, downloaded_bytes = $1, speed = 0, updated_at = datetime('now') where id = $2")
-        .bind(current_offset as i64)
+    let _ = sqlx::query("update downloads set status = 'done', progress = 100.0, speed = 0, updated_at = datetime('now') where id = $1")
         .bind(&id)
         .execute(&state.db)
         .await;
 
-    // Register to cloud_files
-    let storage_path = state.storage_path.clone();
-    if let Some((username, virtual_dir)) = extract_info_from_path(&path, &storage_path) {
-        // Get user_id
-        if let Ok(user_uuid) = sqlx::query_scalar::<_, uuid::Uuid>("select id from users where username = $1")
-            .bind(&username)
-            .fetch_one(&state.db)
-            .await 
-        {
-             let user_id = user_uuid.to_string();
-             
-             // Ensure parent directories exist
-             ensure_directory_exists(&state, &user_id, &virtual_dir).await;
-
-             let file_id = uuid::Uuid::new_v4().to_string();
-             let filename = std::path::Path::new(&path).file_name().unwrap_or_default().to_str().unwrap_or("unknown");
-             
-             // Check if file already exists in cloud_files to avoid duplicates (optional but good)
-             // Actually cloud_files id is primary key, but we want to avoid multiple entries for same file
-             // We can just insert, if we want to support duplicates (same name different id), or check.
-             // Given the schema doesn't have unique constraint on (user_id, dir, name), we just insert.
-             // But let's try to delete existing entry for same path if any, to keep it clean?
-             // Or just insert. User might have deleted it from UI but file remains? No, UI deletes file.
-             // Let's just insert.
-             
-             let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, 'file', datetime('now'), datetime('now'))")
-                .bind(file_id)
-                .bind(user_id)
-                .bind(filename)
-                .bind(virtual_dir)
-                .bind(current_offset as i64)
-                .execute(&state.db)
-                .await;
-             println!("[Downloader] Registered file '{}' to cloud_files", filename);
-        }
-    }
-        
     if let Ok(mut tasks) = state.download_tasks.lock() {
         tasks.remove(&id);
     }
 }
 
-pub async fn control_download(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<ControlDownloadReq>) -> impl IntoResponse {
-    match payload.action.as_str() {
-        "delete" => {
-            // Get task info first to decide whether to delete file
-            if let Ok(task) = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1").bind(&id).fetch_one(&state.db).await {
-                // Abort if running
-                if let Ok(mut tasks) = state.download_tasks.lock() {
-                    if let Some(handle) = tasks.remove(&id) {
-                        handle.abort();
-                    }
-                }
-                
-                // Delete file only if it is NOT done (clean up partial files)
-                // If it is done, user wants to keep the file
-                if task.status != "done" {
-                    let _ = tokio::fs::remove_file(&task.path).await;
-                }
-            }
-            
-            // Delete from DB
-            let _ = sqlx::query("delete from downloads where id = $1").bind(&id).execute(&state.db).await;
-        },
-        "pause" => {
-            // Abort task
-            if let Ok(mut tasks) = state.download_tasks.lock() {
-                if let Some(handle) = tasks.remove(&id) {
-                    handle.abort();
-                    println!("[Downloader] Task {} paused (aborted)", id);
-                }
-            }
-            // Update status
-            let _ = sqlx::query("update downloads set status = 'paused', speed = 0 where id = $1")
-                .bind(&id)
-                .execute(&state.db)
-                .await;
-        },
-        "resume" => {
-            // Get task info
-            if let Ok(task) = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1").bind(&id).fetch_one(&state.db).await {
-                // Spawn new process
-                let state_clone = state.clone();
-                let id_clone = id.clone();
-                let url_clone = task.url.clone();
-                let path_clone = task.path.clone();
+pub async fn pause_download(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let handle_opt = if let Ok(mut tasks) = state.download_tasks.lock() {
+        tasks.remove(&id)
+    } else {
+        None
+    };
 
-                let handle = tokio::spawn(async move {
-                    download_process(state_clone, id_clone, url_clone, path_clone).await;
-                });
-                
-                if let Ok(mut tasks) = state.download_tasks.lock() {
-                    tasks.insert(id.clone(), handle.abort_handle());
-                }
-                println!("[Downloader] Task {} resumed", id);
-            }
-        },
-        _ => {}
+    if let Some(handle) = handle_opt {
+        handle.abort();
+        let _ = sqlx::query("update downloads set status = 'paused', speed = 0 where id = $1")
+            .bind(&id)
+            .execute(&state.db)
+            .await;
+        return (StatusCode::OK, "Paused").into_response();
     }
-    StatusCode::OK.into_response()
+    (StatusCode::NOT_FOUND, "Task not found or already stopped").into_response()
+}
+
+pub async fn resume_download(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await;
+
+    if let Ok(Some(task)) = task {
+        if task.status == "downloading" {
+            return (StatusCode::OK, "Already downloading").into_response();
+        }
+        
+        // Restart logic depending on type
+        // For now, we only support resuming normal HTTP downloads via creating a new task logic but keeping ID?
+        // Actually, resuming requires re-spawning the process.
+        // Simplified: just update status and spawn.
+        
+        let state_clone = state.clone();
+        let id_clone = id.clone();
+        let url_clone = task.url.clone();
+        let path_clone = task.path.clone(); // This is full file path for http, directory for magnet?
+        
+        let handle = if url_clone.starts_with("magnet:?") {
+             // For magnet, path is save_dir
+             tokio::spawn(async move {
+                download_magnet_process(state_clone, id_clone, url_clone, path_clone).await;
+            })
+        } else {
+             tokio::spawn(async move {
+                download_process(state_clone, id_clone, url_clone, path_clone).await;
+            })
+        };
+
+        if let Ok(mut tasks) = state.download_tasks.lock() {
+            tasks.insert(id.clone(), handle.abort_handle());
+        }
+
+        return (StatusCode::OK, "Resumed").into_response();
+    }
+    
+    (StatusCode::NOT_FOUND, "Task not found").into_response()
+}
+
+pub async fn delete_download(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    // Stop if running
+    let handle_opt = if let Ok(mut tasks) = state.download_tasks.lock() {
+        tasks.remove(&id)
+    } else {
+        None
+    };
+
+    if let Some(handle) = handle_opt {
+        handle.abort();
+    }
+    
+    // Delete from DB
+    let _ = sqlx::query("delete from downloads where id = $1")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+        
+    // Optional: Delete file? user might want to keep it. 
+    // Usually "delete task" implies keeping file, "delete task and file" is another option.
+    // Here we just delete task.
+    
+    (StatusCode::OK, "Deleted").into_response()
+}
+
+#[axum::debug_handler]
+pub async fn control_download(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<ControlDownloadReq>
+) -> impl IntoResponse {
+    match payload.action.as_str() {
+        "pause" => pause_download(State(state), Path(id)).await.into_response(),
+        "resume" => resume_download(State(state), Path(id)).await.into_response(),
+        "delete" => delete_download(State(state), Path(id)).await.into_response(),
+        _ => (StatusCode::BAD_REQUEST, "Invalid action").into_response(),
+    }
 }

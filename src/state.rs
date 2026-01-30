@@ -19,5 +19,7 @@ pub struct AppState {
     pub networks: Arc<Mutex<Networks>>,
     pub components: Arc<Mutex<Components>>,
     pub download_tasks: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+    pub torrent_session: Arc<librqbit::Session>,
+    pub magnet_cache: Arc<Mutex<HashMap<String, bytes::Bytes>>>,
 }
 
