@@ -374,8 +374,174 @@ pub async fn download(State(state): State<AppState>, Extension(user): Extension<
         .unwrap()
 }
 
-pub async fn rename(State(_state): State<AppState>, Extension(_user): Extension<AuthUser>, Json(_req): Json<DocsRenameReq>) -> impl IntoResponse {
-    Json(serde_json::json!({ "ok": false, "error": "not_implemented_yet" }))
+pub async fn rename(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(req): Json<DocsRenameReq>) -> impl IntoResponse {
+    
+    // 1. Identify source
+    let (src_id, src_name, src_dir, src_storage) = if let Some(id) = &req.id {
+         // Find by ID
+         if let Ok(row) = sqlx::query("select id, name, dir, storage, user_id from cloud_files where id = $1")
+            .bind(id).fetch_one(&state.db).await {
+            
+            let d: String = row.try_get("dir").unwrap_or_default();
+            let u: String = row.try_get("user_id").unwrap_or_default();
+             // Check access
+            if d.starts_with("/AppData") {
+                 if let Err(_) = resolve_path(&state, &user.username, &d).await {
+                     return Json(serde_json::json!({ "ok": false, "error": "access denied" }));
+                 }
+            } else {
+                 if u != user.user_id.to_string() {
+                     return Json(serde_json::json!({ "ok": false, "error": "not found" }));
+                 }
+            }
+            (
+                row.try_get::<String, _>("id").unwrap_or_default(),
+                row.try_get::<String, _>("name").unwrap_or_default(),
+                d,
+                row.try_get::<String, _>("storage").unwrap_or_default(),
+            )
+         } else { return Json(serde_json::json!({ "ok": false, "error": "not found" })); }
+    } else if let Some(from) = &req.from {
+        let np = normalize_path(from);
+        let parent = {
+            let p = Path::new(&np);
+            let pp = p.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
+            if pp.is_empty() { "/".to_string() } else { if pp.starts_with('/') { pp } else { format!("/{}", pp) } }
+        };
+        let name = Path::new(&np).file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
+        
+        let is_app_data = parent.starts_with("/AppData");
+        let row = if is_app_data {
+            sqlx::query("select id, storage from cloud_files where dir = $1 and name = $2")
+                .bind(&parent)
+                .bind(&name)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None)
+        } else {
+            sqlx::query("select id, storage from cloud_files where user_id = $1 and dir = $2 and name = $3")
+                .bind(user.user_id.to_string())
+                .bind(&parent)
+                .bind(&name)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None)
+        };
+        
+        if let Some(r) = row {
+            (
+                r.try_get("id").unwrap_or_default(),
+                name,
+                parent,
+                r.try_get("storage").unwrap_or_default(),
+            )
+        } else {
+             return Json(serde_json::json!({ "ok": false, "error": "not found" }));
+        }
+    } else {
+        return Json(serde_json::json!({ "ok": false, "error": "missing source" }));
+    };
+    
+    // 2. Identify destination
+    let (target_dir, target_name) = if let Some(to) = &req.to {
+        let np = normalize_path(to);
+        let parent = {
+            let p = Path::new(&np);
+            let pp = p.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
+            if pp.is_empty() { "/".to_string() } else { if pp.starts_with('/') { pp } else { format!("/{}", pp) } }
+        };
+        let name = Path::new(&np).file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
+        (parent, name)
+    } else if let (Some(nd), Some(nn)) = (&req.new_dir, &req.new_name) {
+        (normalize_path(nd), nn.clone())
+    } else if let Some(nn) = &req.new_name {
+        (src_dir.clone(), nn.clone())
+    } else {
+        return Json(serde_json::json!({ "ok": false, "error": "missing destination" }));
+    };
+    
+    // 3. Resolve physical paths
+    let src_parent_fs = match resolve_path(&state, &user.username, &src_dir).await {
+        Ok(p) => p,
+        Err(_) => return Json(serde_json::json!({ "ok": false, "error": "access denied" })),
+    };
+    let src_fs_path = src_parent_fs.join(&src_name);
+    
+    let dest_parent_fs = match resolve_path(&state, &user.username, &target_dir).await {
+        Ok(p) => p,
+        Err(_) => return Json(serde_json::json!({ "ok": false, "error": "access denied" })),
+    };
+    // Ensure dest parent exists physically
+    if let Err(_) = tokio_fs::create_dir_all(&dest_parent_fs).await {
+         return Json(serde_json::json!({ "ok": false, "error": "failed to create dest dir" }));
+    }
+    let dest_fs_path = dest_parent_fs.join(&target_name);
+    
+    // 4. Perform physical rename
+    if let Err(e) = tokio_fs::rename(&src_fs_path, &dest_fs_path).await {
+        println!("Physical rename failed: {:?} -> {:?}: {}", src_fs_path, dest_fs_path, e);
+        return Json(serde_json::json!({ "ok": false, "error": e.to_string() }));
+    }
+    
+    // 5. Update database
+    // Update self
+    if let Err(e) = sqlx::query("update cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where id = $3")
+        .bind(&target_dir)
+        .bind(&target_name)
+        .bind(&src_id)
+        .execute(&state.db)
+        .await 
+    {
+        println!("DB update failed: {}", e);
+        // Rollback physical? Too late/complex.
+    }
+    
+    // If directory, update children recursively
+    // Logic: find all items where dir starts with (src_dir + "/" + src_name)
+    // Replace prefix with (target_dir + "/" + target_name)
+    if src_storage == "dir" {
+        let old_prefix = if src_dir == "/" {
+            format!("/{}", src_name)
+        } else {
+            format!("{}/{}", src_dir, src_name)
+        };
+        
+        let new_prefix = if target_dir == "/" {
+            format!("/{}", target_name)
+        } else {
+            format!("{}/{}", target_dir, target_name)
+        };
+        
+        // SQLite doesn't have a simple regex replace, need to do string manipulation
+        // dir = new_prefix || substr(dir, length(old_prefix) + 1)
+        // WHERE dir = old_prefix OR dir LIKE old_prefix || '/%'
+        
+        // Note: old_prefix should not have trailing slash for exact match, 
+        // but for children it needs checking.
+        
+        let sql = format!(
+            "UPDATE cloud_files SET dir = '{}' || SUBSTR(dir, {} + 1) WHERE dir = '{}' OR dir LIKE '{}' || '/%'",
+            new_prefix, old_prefix.len(), old_prefix, old_prefix
+        );
+        // Warning: This SQL injection risk if paths contain single quotes. 
+        // Should use bind parameters but dynamic string concatenation in SQL with binds is tricky in pure SQL.
+        // Better:
+        // UPDATE cloud_files SET dir = ? || SUBSTR(dir, LENGTH(?) + 1) WHERE dir = ? OR dir LIKE ? || '/%'
+        
+        let like_pattern = format!("{}/%", old_prefix);
+        
+        if let Err(e) = sqlx::query("UPDATE cloud_files SET dir = $1 || SUBSTR(dir, LENGTH($2) + 1) WHERE dir = $2 OR dir LIKE $3")
+            .bind(&new_prefix)
+            .bind(&old_prefix)
+            .bind(&like_pattern)
+            .execute(&state.db)
+            .await 
+        {
+             println!("Failed to update children paths: {}", e);
+        }
+    }
+    
+    Json(serde_json::json!({ "ok": true }))
 }
 
 pub async fn delete(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<DocsDeleteQuery>) -> impl IntoResponse {
@@ -404,6 +570,44 @@ pub async fn delete(State(state): State<AppState>, Extension(user): Extension<Au
                 row.try_get::<String, _>("storage").unwrap_or_default(),
             )
          } else { return Json(serde_json::json!({ "ok": false })); }
+    } else if let Some(path) = &q.path {
+        let np = normalize_path(path);
+        let parent = {
+            let p = Path::new(&np);
+            let pp = p.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
+            if pp.is_empty() { "/".to_string() } else { if pp.starts_with('/') { pp } else { format!("/{}", pp) } }
+        };
+        let name = Path::new(&np).file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
+        
+        // Find ID from path
+        let is_app_data = parent.starts_with("/AppData");
+        let row = if is_app_data {
+            sqlx::query("select id, storage from cloud_files where dir = $1 and name = $2")
+                .bind(&parent)
+                .bind(&name)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None)
+        } else {
+            sqlx::query("select id, storage from cloud_files where user_id = $1 and dir = $2 and name = $3")
+                .bind(user.user_id.to_string())
+                .bind(&parent)
+                .bind(&name)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None)
+        };
+        
+        if let Some(r) = row {
+            (
+                r.try_get("id").unwrap_or_default(),
+                name,
+                parent,
+                r.try_get("storage").unwrap_or_default(),
+            )
+        } else {
+             return Json(serde_json::json!({ "ok": false, "error": "not found" }));
+        }
     } else { return Json(serde_json::json!({ "ok": false })); };
 
     let parent_fs_path = match resolve_path(&state, &user.username, &dir).await {

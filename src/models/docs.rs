@@ -1,18 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct DocsListQuery {
     pub path: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct DocsMkdirReq {
     pub path: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct DocsRenameReq {
     pub from: Option<String>,
     pub to: Option<String>,
@@ -21,13 +21,13 @@ pub struct DocsRenameReq {
     pub new_dir: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct DocsDownloadQuery {
     pub id: Option<String>,
     pub path: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct DocsDeleteQuery {
     pub id: Option<String>,
     pub path: Option<String>,

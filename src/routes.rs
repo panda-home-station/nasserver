@@ -14,9 +14,14 @@ use crate::middleware::require_auth;
 
 pub fn api_app(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PUT, Method::OPTIONS])
         .allow_origin(Any)
-        .allow_headers(Any);
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::ACCEPT,
+            axum::http::header::ORIGIN,
+        ]);
 
     let protected = Router::new()
         .route("/api/auth/whoami", get(auth::whoami))
