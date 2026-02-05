@@ -10,6 +10,8 @@ use bollard::container::{
 };
 use bollard::models::{HostConfig, PortBinding};
 use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
+use bollard::volume::ListVolumesOptions;
+use bollard::network::ListNetworksOptions;
 use bollard::Docker;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -91,6 +93,43 @@ pub struct ImageInfo {
     exposed_ports: Vec<u16>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct VolumeInfo {
+    name: String,
+    driver: String,
+    mountpoint: String,
+    created_at: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct NetworkInfo {
+    id: String,
+    name: String,
+    driver: String,
+    scope: String,
+    internal: bool,
+    attachable: bool,
+    ingress: bool,
+    #[serde(rename = "IPAM")]
+    ipam: NetworkIpam,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct NetworkIpam {
+    driver: String,
+    config: Vec<NetworkIpamConfig>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct NetworkIpamConfig {
+    subnet: Option<String>,
+    gateway: Option<String>,
+}
+
 pub async fn list_containers(State(_st): State<AppState>) -> impl IntoResponse {
     let docker = docker_client();
     let res = docker
@@ -156,6 +195,68 @@ pub async fn list_images(State(_st): State<AppState>) -> impl IntoResponse {
                     exposed_ports,
                 });
             }
+            Json(items).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub async fn list_volumes(State(_st): State<AppState>) -> impl IntoResponse {
+    let docker = docker_client();
+    match docker.list_volumes(None::<ListVolumesOptions<String>>).await {
+        Ok(list) => {
+            let items: Vec<VolumeInfo> = list.volumes.unwrap_or_default()
+                .into_iter()
+                .map(|v| VolumeInfo {
+                    name: v.name,
+                    driver: v.driver,
+                    mountpoint: v.mountpoint,
+                    created_at: v.created_at,
+                })
+                .collect();
+            Json(items).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub async fn list_networks(State(_st): State<AppState>) -> impl IntoResponse {
+    let docker = docker_client();
+    match docker.list_networks(None::<ListNetworksOptions<String>>).await {
+        Ok(list) => {
+            let items: Vec<NetworkInfo> = list
+                .into_iter()
+                .map(|n| {
+                    let config = if let Some(ipam) = &n.ipam {
+                        if let Some(config) = &ipam.config {
+                            config.iter().map(|c| NetworkIpamConfig {
+                                subnet: c.subnet.clone(),
+                                gateway: c.gateway.clone(),
+                            }).collect()
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    let ipam = NetworkIpam {
+                        driver: n.ipam.as_ref().and_then(|i| i.driver.clone()).unwrap_or_default(),
+                        config,
+                    };
+
+                    NetworkInfo {
+                        id: n.id.unwrap_or_default(),
+                        name: n.name.unwrap_or_default(),
+                        driver: n.driver.unwrap_or_default(),
+                        scope: n.scope.unwrap_or_default(),
+                        internal: n.internal.unwrap_or_default(),
+                        attachable: n.attachable.unwrap_or_default(),
+                        ingress: n.ingress.unwrap_or_default(),
+                        ipam,
+                    }
+                })
+                .collect();
             Json(items).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

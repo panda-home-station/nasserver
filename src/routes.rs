@@ -37,6 +37,8 @@ pub fn api_app(state: AppState) -> Router {
         // Podman management (via Docker-compatible client; supports Podman socket)
         .route("/api/podman/containers", get(docker::list_containers))
         .route("/api/podman/images", get(docker::list_images))
+        .route("/api/podman/volumes", get(docker::list_volumes))
+        .route("/api/podman/networks", get(docker::list_networks))
         .route("/api/podman/container/start", post(docker::start_container))
         .route("/api/podman/container/stop", post(docker::stop_container))
         .route("/api/podman/container/restart", post(docker::restart_container))
