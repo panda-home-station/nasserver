@@ -11,7 +11,7 @@ use uuid::Uuid;
 use local_ip_address::local_ip;
 
 use crate::state::{AppState, START_TIME};
-use crate::models::system::{InitStateResp, InitReq, DeviceInfoResp, DiskUsage, HardwareInfo, NetworkInfo, HealthResp, VersionResp};
+use crate::models::system::{InitStateResp, InitReq, DeviceInfoResp, DiskUsage, HardwareInfo, NetworkInfo, HealthResp, VersionResp, PhysicalDisk};
 
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -28,6 +28,97 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+use ash::{Entry, vk};
+use std::fs;
+
+fn get_gpu_info() -> String {
+    // Try Vulkan via ash (library API)
+    unsafe {
+        if let Ok(entry) = Entry::load() {
+            // Validate if we can create instance
+            let app_info = vk::ApplicationInfo {
+                api_version: vk::make_api_version(0, 1, 0, 0),
+                ..Default::default()
+            };
+            
+            let create_info = vk::InstanceCreateInfo {
+                p_application_info: &app_info,
+                ..Default::default()
+            };
+            
+            if let Ok(instance) = entry.create_instance(&create_info, None) {
+                if let Ok(devices) = instance.enumerate_physical_devices() {
+                    for device in devices {
+                        let props = instance.get_physical_device_properties(device);
+                        let name = std::ffi::CStr::from_ptr(props.device_name.as_ptr())
+                            .to_string_lossy()
+                            .into_owned();
+                        
+                        if !name.to_lowercase().contains("llvmpipe") {
+                            return name;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback: simple default if library fails
+    "Integrated Graphics".to_string()
+}
+
+fn get_physical_disks() -> Vec<PhysicalDisk> {
+    let mut disks = Vec::new();
+    if let Ok(entries) = fs::read_dir("/sys/class/block") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            
+            // Filter: must not be partition (check if 'partition' file exists)
+            if path.join("partition").exists() { continue; }
+            // Filter: must be real device (usually has 'device' symlink)
+            if !path.join("device").exists() { continue; }
+            
+            // Read vendor/model
+            let vendor = fs::read_to_string(path.join("device/vendor")).unwrap_or_default().trim().to_string();
+            let model = fs::read_to_string(path.join("device/model")).unwrap_or_default().trim().to_string();
+            
+            // If both empty, skip (likely virtual device)
+            if vendor.is_empty() && model.is_empty() { continue; }
+            
+            // Size (in 512-byte sectors)
+            let size_sectors = fs::read_to_string(path.join("size"))
+                .unwrap_or("0".to_string())
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0);
+            let size_bytes = size_sectors * 512;
+            let size_str = format_bytes(size_bytes);
+            
+            // Rotational (0 = SSD, 1 = HDD)
+            let is_rotational = fs::read_to_string(path.join("queue/rotational"))
+                .unwrap_or("1".to_string())
+                .trim() == "1";
+                
+            // Serial (best effort)
+            let serial = fs::read_to_string(path.join("device/serial"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+
+            disks.push(PhysicalDisk {
+                name,
+                model,
+                vendor,
+                size: size_str,
+                serial,
+                is_rotational,
+            });
+        }
+    }
+    disks
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -183,8 +274,12 @@ pub async fn get_device_info(State(st): State<AppState>) -> impl IntoResponse {
         .map(|t| format!("{:.0}°C", t))
         .unwrap_or("N/A".to_string());
 
+    // GPU detection (Vulkan -> lspci fallback)
+    let gpu_info = get_gpu_info();
+
     let hardware = HardwareInfo {
         cpu: format!("{} ({}核)", cpu_brand.trim(), cpu_count),
+        gpu: gpu_info,
         memory: format!("{} DDR4", format_bytes(total_mem)), // DDR4 is hardcoded guess, sysinfo doesn't give type
         temperature: format!("CPU {}", temp_val),
     };
@@ -206,6 +301,9 @@ pub async fn get_device_info(State(st): State<AppState>) -> impl IntoResponse {
         transfer: format!("↑ {} ↓ {}", format_bytes(total_tx), format_bytes(total_rx)),
     };
 
+    // Physical Disks (via sysfs)
+    let phy_disks = get_physical_disks();
+
     Json(DeviceInfoResp {
         device_name: name,
         device_id: id,
@@ -215,6 +313,7 @@ pub async fn get_device_info(State(st): State<AppState>) -> impl IntoResponse {
         uptime: uptime_str,
         system_disk,
         data_disk,
+        phy_disks,
         hardware,
         network,
     })

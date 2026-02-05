@@ -20,6 +20,16 @@ pub struct DiskUsage {
 }
 
 #[derive(Serialize, Clone, Debug)]
+pub struct PhysicalDisk {
+    pub name: String,
+    pub model: String,
+    pub size: String,
+    pub serial: String,
+    pub vendor: String,
+    pub is_rotational: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct DeviceInfoResp {
     pub device_name: String,
     pub device_id: String,
@@ -29,6 +39,7 @@ pub struct DeviceInfoResp {
     pub uptime: String,
     pub system_disk: DiskUsage,
     pub data_disk: DiskUsage,
+    pub phy_disks: Vec<PhysicalDisk>,
     pub hardware: HardwareInfo,
     pub network: NetworkInfo,
 }
@@ -36,6 +47,7 @@ pub struct DeviceInfoResp {
 #[derive(Serialize, Clone, Debug)]
 pub struct HardwareInfo {
     pub cpu: String,
+    pub gpu: String,
     pub memory: String,
     pub temperature: String,
 }
