@@ -234,9 +234,7 @@ async fn main() {
     
     // Enable listener and UPnP for better connectivity
     let mut session_opts = librqbit::SessionOptions::default();
-    let mut listener_opts = librqbit::ListenerOptions::default();
-    listener_opts.enable_upnp_port_forwarding = true;
-    session_opts.listen = Some(listener_opts);
+    session_opts.enable_upnp_port_forwarding = true;
     
     let session = librqbit::Session::new_with_opts(torrent_dir.into(), session_opts).await.expect("Failed to init torrent session");
 

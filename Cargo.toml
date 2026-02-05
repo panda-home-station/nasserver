@@ -34,5 +34,5 @@ hyper = { version = "0.14", features = ["client"] }
 hyperlocal = "0.8"
 bytes = "1.11.0"
 ash = "0.37"
-librqbit = { path = "../vendor/rqbit/crates/librqbit" }
-librqbit-core = { path = "../vendor/rqbit/crates/librqbit_core" }
+librqbit = "8.1"
+librqbit-core = "5.0"

@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use std::time::Instant;
 use crate::handlers::docs::{resolve_path, normalize_path};
 use serde::Serialize;
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, ManagedTorrent, Api};
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, ManagedTorrent, Api, ByteBufOwned};
 use librqbit::dht::Id20;
 use std::str::FromStr;
 
@@ -143,7 +143,7 @@ pub async fn list_downloads(State(state): State<AppState>) -> impl IntoResponse 
     let storage_path = state.storage_path.clone();
     let api = Api::new(state.torrent_session.clone(), None);
 
-    for task in tasks {
+    for mut task in tasks {
         let virtual_path = get_virtual_path(&task.path, &storage_path);
         let mut sub_tasks = None;
 
@@ -153,12 +153,28 @@ pub async fn list_downloads(State(state): State<AppState>) -> impl IntoResponse 
                 
                 if let Ok(id) = Id20::from_str(hash_clean) {
                     if let Ok(details) = api.api_torrent_details(librqbit::api::TorrentIdOrHash::Hash(id)) {
+                         if let Some(stats) = &details.stats {
+                             if stats.total_bytes > 0 {
+                                 task.progress = (stats.progress_bytes as f64 / stats.total_bytes as f64) * 100.0;
+                             }
+                             task.downloaded_bytes = stats.progress_bytes as i64;
+                             task.total_bytes = stats.total_bytes as i64;
+                             if let Some(live) = &stats.live {
+                                 // mbps is MiB/s, convert to bytes/s
+                                 task.speed = (live.download_speed.mbps * 1024.0 * 1024.0) as i64;
+                             } else {
+                                 task.speed = 0;
+                             }
+                             task.status = stats.state.to_string();
+                         }
+
                          if let Some(files) = details.files {
                              let mut subs = Vec::new();
+                             let file_progress = details.stats.as_ref().map(|s| &s.file_progress);
                              for (idx, file) in files.iter().enumerate() {
                                  let size = file.length;
-                                 let downloaded = file.bytes_downloaded;
-                                 let speed = file.download_speed;
+                                 let downloaded = file_progress.and_then(|fp| fp.get(idx).copied()).unwrap_or(0);
+                                 let speed = 0; // Per-file speed not available easily
                                  
                                  let progress = if size > 0 {
                                      (downloaded as f64 / size as f64) * 100.0
@@ -350,15 +366,17 @@ pub async fn resolve_magnet(State(state): State<AppState>, Json(payload): Json<R
             let info_hash = resp.info_hash.as_string();
             let mut files = Vec::new();
             
-            for (idx, fd) in resp.info.iter_file_details().enumerate() {
-                files.push(TorrentFileMetadata {
-                    index: idx,
-                    name: fd.filename.to_string(),
-                    size: fd.len,
-                });
+            if let Ok(file_details) = resp.info.iter_file_details() {
+                for (idx, fd) in file_details.enumerate() {
+                    files.push(TorrentFileMetadata {
+                        index: idx,
+                        name: fd.filename.to_string().unwrap_or_default(),
+                        size: fd.len,
+                    });
+                }
             }
 
-            let name = resp.info.name().map(|n| n.into_owned());
+            let name = resp.info.name.clone().map(|n| n.to_string());
             
             // Cache the torrent bytes
             if let Ok(mut cache) = state.magnet_cache.lock() {
@@ -392,18 +410,13 @@ pub async fn start_magnet_download(State(state): State<AppState>, Extension(user
     };
     
     // Parse torrent metadata to determine name and structure
-    let meta_result = torrent_from_bytes(&torrent_bytes);
+    let meta_result = torrent_from_bytes::<ByteBufOwned>(&torrent_bytes);
     let (torrent_name, is_single_file) = match meta_result {
         Ok(meta) => {
-            // meta.info is WithRawBytes, we need to access the inner data
-            match meta.info.data.validate() {
-                Ok(info) => {
-                    let name = info.name().map(|n| n.into_owned()).unwrap_or_else(|| "magnet_download".to_string());
-                    let is_single = info.info().length.is_some();
-                    (name, is_single)
-                },
-                Err(_) => ("magnet_download".to_string(), false)
-            }
+            // meta.info is TorrentMetaV1Info (or compatible)
+            let name = meta.info.name.clone().map(|n| n.to_string()).unwrap_or_else(|| "magnet_download".to_string());
+            let is_single = meta.info.length.is_some();
+            (name, is_single)
         },
         Err(_) => ("magnet_download".to_string(), false)
     };
@@ -448,7 +461,7 @@ pub async fn start_magnet_download(State(state): State<AppState>, Extension(user
         Ok(resp) => {
             if let Some(handle) = resp.into_handle() {
                 // Get torrent name if possible (using placeholder if API access fails)
-                let torrent_name = handle.name().unwrap_or_else(|| torrent_name.clone());
+                let torrent_name: String = handle.name().unwrap_or(torrent_name.clone());
 
                  let task = DownloadTask {
                     id: id.clone(),
@@ -527,7 +540,7 @@ async fn monitor_torrent_process(state: AppState, id: String, handle: std::sync:
         let total_bytes = stats.total_bytes;
         let downloaded_bytes = stats.progress_bytes; 
         let progress = if total_bytes > 0 { (downloaded_bytes as f64 / total_bytes as f64) * 100.0 } else { 0.0 };
-        let speed = stats.live.as_ref().map(|l| l.download_speed.as_bytes()).unwrap_or(0);
+        let speed = stats.live.as_ref().map(|l| (l.download_speed.mbps * 1024.0 * 1024.0) as u64).unwrap_or(0);
         
         let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = datetime('now') where id = $5")
             .bind(downloaded_bytes as i64)
