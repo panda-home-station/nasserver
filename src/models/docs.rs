@@ -40,6 +40,7 @@ pub struct DocsEntry {
     pub is_dir: bool,
     pub size: i64,
     pub modified_ts: i64,
+    pub mime: String,
 }
 
 #[derive(Serialize)]

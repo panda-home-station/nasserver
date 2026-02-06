@@ -11,6 +11,7 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use sqlx::Row;
 use serde::Deserialize;
+use mime_guess;
 
 use crate::state::AppState;
 use crate::models::auth::AuthUser;
@@ -80,6 +81,56 @@ pub async fn list(State(state): State<AppState>, Extension(user): Extension<Auth
         }
     }
 
+    // Special handling for AppData root listing
+    if dir == "/AppData" {
+        let mut entries: Vec<DocsEntry> = Vec::new();
+        
+        if user.username == "admin" {
+            // Admin sees all apps in AppData
+            let app_data_path = Path::new(&state.storage_path).join("vol1/AppData");
+            if let Ok(mut read_dir) = tokio_fs::read_dir(app_data_path).await {
+                while let Ok(Some(entry)) = read_dir.next_entry().await {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !name.starts_with('.') {
+                            entries.push(DocsEntry {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                name,
+                                is_dir: true,
+                                size: 0,
+                                modified_ts: 0,
+                                mime: "application/x-app".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fetch accessible apps from app_permissions
+            let apps: Vec<String> = sqlx::query_scalar("select app_name from app_permissions where username = $1")
+                .bind(&user.username)
+                .fetch_all(&state.db)
+                .await
+                .unwrap_or_default();
+                
+            for app in apps {
+                 let path = Path::new(&state.storage_path).join("vol1/AppData").join(&app);
+                 if path.exists() {
+                     entries.push(DocsEntry {
+                         id: uuid::Uuid::new_v4().to_string(),
+                         name: app,
+                         is_dir: true,
+                         size: 0,
+                         modified_ts: 0, // Just use 0 or current time
+                         mime: "application/x-app".to_string(),
+                     });
+                 }
+            }
+        }
+        return Json(DocsListResp { path: "AppData".to_string(), entries, has_more: false, next_offset: 0 });
+    }
+
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0).max(0);
     let page_size = limit + 1;
@@ -87,34 +138,104 @@ pub async fn list(State(state): State<AppState>, Extension(user): Extension<Auth
     // Use different query for AppData (shared) vs User (private)
     let is_app_data = dir.starts_with("/AppData");
     
-    let rows = if is_app_data {
-        sqlx::query("select id, name, storage, size, strftime('%s', coalesce(updated_at, created_at)) as ts from cloud_files where dir = $1 order by storage desc, name asc limit $2 offset $3")
-            .bind(&dir)
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&state.db)
-            .await
+    let mut entries: Vec<DocsEntry> = Vec::new();
+    let mut has_more = false;
+    let mut next_offset = 0;
+
+    if is_app_data {
+        // Physical listing for AppData
+        let mut physical_entries = Vec::new();
+        let fs_path = match resolve_path(&state, &user.username, &dir).await {
+            Ok(p) => p,
+            Err(_) => return Json(DocsListResp { path: dir, entries: vec![], has_more: false, next_offset: 0 }),
+        };
+
+        if let Ok(mut read_dir) = tokio_fs::read_dir(fs_path).await {
+            while let Ok(Some(entry)) = read_dir.next_entry().await {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+
+                let is_dir = path.is_dir();
+                let meta = entry.metadata().await.ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0) as i64;
+                let ts = meta.as_ref().and_then(|m| m.modified().ok())
+                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+                    .unwrap_or(0);
+                
+                let mime = if is_dir {
+                    "application/x-directory".to_string()
+                } else {
+                    mime_guess::from_path(&path).first_or_octet_stream().to_string()
+                };
+
+                // Construct a physical ID: phys:{urlencoding::encode(virtual_path)}
+                // We need the virtual path for the entry.
+                // dir is e.g. /AppData/jellyfin
+                // entry virtual path is /AppData/jellyfin/subdir
+                let entry_vpath = if dir == "/" { format!("/{}", name) } else { format!("{}/{}", dir, name) };
+                let id = format!("phys:{}", urlencoding::encode(&entry_vpath));
+
+                physical_entries.push(DocsEntry {
+                    id,
+                    name,
+                    is_dir,
+                    size,
+                    modified_ts: ts,
+                    mime,
+                });
+            }
+        }
+        
+        // Sort and paginate manually
+        physical_entries.sort_by(|a, b| {
+            if a.is_dir != b.is_dir {
+                b.is_dir.cmp(&a.is_dir) // dirs first
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+        
+        let total = physical_entries.len();
+        let start = offset as usize;
+        let end = (start + limit as usize).min(total);
+        
+        if start < total {
+            for e in physical_entries.drain(start..end) {
+                entries.push(e);
+            }
+        }
+        has_more = end < total;
+        next_offset = end as i64;
+
     } else {
-        sqlx::query("select id, name, storage, size, strftime('%s', coalesce(updated_at, created_at)) as ts from cloud_files where user_id = $1 and dir = $2 order by storage desc, name asc limit $3 offset $4")
+        let rows = sqlx::query("select id, name, storage, size, mime, strftime('%s', coalesce(updated_at, created_at)) as ts from cloud_files where user_id = $1 and dir = $2 order by storage desc, name asc limit $3 offset $4")
             .bind(user.user_id)
             .bind(&dir)
             .bind(page_size)
             .bind(offset)
             .fetch_all(&state.db)
             .await
-    }.unwrap_or_default();
+            .unwrap_or_default();
 
-    let mut entries: Vec<DocsEntry> = Vec::new();
-    for r in rows.iter().take(limit as usize) {
-        let id: String = r.try_get("id").unwrap_or_default();
-        let name: String = r.try_get("name").unwrap_or_default();
-        let storage: String = r.try_get("storage").unwrap_or_default();
-        let size: i64 = r.try_get("size").unwrap_or(0);
-        let ts: i64 = r.try_get("ts").unwrap_or(0);
-        entries.push(DocsEntry { id, name, is_dir: storage == "dir", size, modified_ts: ts });
+        for r in rows.iter().take(limit as usize) {
+            let id: String = r.try_get("id").unwrap_or_default();
+            let name: String = r.try_get("name").unwrap_or_default();
+            let storage: String = r.try_get("storage").unwrap_or_default();
+            let size: i64 = r.try_get("size").unwrap_or(0);
+            let ts: i64 = r.try_get("ts").unwrap_or(0);
+            let mime_val: String = r.try_get("mime").unwrap_or_default();
+            let mime = if mime_val.is_empty() {
+                if storage == "dir" { "application/x-directory".to_string() } else { "application/octet-stream".to_string() }
+            } else {
+                mime_val
+            };
+            entries.push(DocsEntry { id, name, is_dir: storage == "dir", size, modified_ts: ts, mime });
+        }
+        has_more = rows.len() > limit as usize;
+        next_offset = offset + entries.len() as i64;
     }
-    let has_more = rows.len() > limit as usize;
-    let next_offset = offset + entries.len() as i64;
+    
     Json(DocsListResp { path: dir, entries, has_more, next_offset })
 }
 
@@ -290,11 +411,20 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
 
 pub async fn download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Query(q): Query<DocsDownloadQuery>) -> Response {
     let (name, dir) = if let Some(id) = &q.id {
-        // Need to find the file first to know its path
-        // For AppData, we don't check user_id if it's in AppData dir? 
-        // But we don't know the dir yet.
-        // So we query by ID first.
-        if let Ok(row) = sqlx::query("select name, dir, user_id from cloud_files where id = $1")
+        if id.starts_with("phys:") {
+            let encoded = &id[5..];
+            let vpath = urlencoding::decode(encoded).unwrap_or(std::borrow::Cow::Borrowed("")).to_string();
+            if vpath.is_empty() {
+                return Response::builder().status(404).body(Body::empty()).unwrap();
+            }
+            
+            let p = Path::new(&vpath);
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let parent = p.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
+            let parent = if parent.is_empty() { "/".to_string() } else { if parent.starts_with('/') { parent } else { format!("/{}", parent) } };
+            
+            (name, parent)
+        } else if let Ok(row) = sqlx::query("select name, dir, user_id from cloud_files where id = $1")
             .bind(id)
             .fetch_one(&state.db)
             .await 

@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 pub async fn init(state: AppState) {
     // Determine the path to watch: {storage_path}/vol1/User
+    // We only watch User directory for DB syncing. AppData is accessed directly.
     let watch_path = format!("{}/vol1/User", state.storage_path);
     let watch_path_buf = PathBuf::from(&watch_path);
 
@@ -202,55 +203,42 @@ struct FileInfo {
 async fn parse_path(state: &AppState, path: &Path) -> Option<FileInfo> {
     let storage_base = PathBuf::from(&state.storage_path).join("vol1/User");
     
-    println!("ParsePath: checking {:?} against base {:?}", path, storage_base);
+    // println!("ParsePath: checking {:?} against base {:?}", path, storage_base);
 
     let rel_path = match path.strip_prefix(&storage_base) {
         Ok(p) => p,
         Err(_) => {
-            println!("ParsePath: Mismatch! Path does not start with base.");
+            // println!("ParsePath: Mismatch! Path does not start with base.");
             return None;
         }
     };
 
     let rel_path_str = rel_path.to_string_lossy();
-    let parts: Vec<&str> = rel_path_str.splitn(2, '/').collect();
+    let parts: Vec<&str> = rel_path_str.split('/').collect();
     if parts.is_empty() || parts[0].is_empty() {
         return None;
     }
-    let username = parts[0];
-    let virtual_rel_path = if parts.len() > 1 { parts[1] } else { "" };
     
     if is_hidden(path) {
-        println!("ParsePath: File is hidden, skipping: {:?}", path);
+        // println!("ParsePath: File is hidden, skipping: {:?}", path);
         return None;
     }
 
-    // Get User ID
+    // vol1/User/username/...
+    let username = parts[0];
+    let virtual_rel_path = if parts.len() > 1 { parts[1..].join("/") } else { "".to_string() };
+    
     let user_id_result = sqlx::query_scalar::<_, Uuid>("select id from users where username = $1")
         .bind(username)
         .fetch_optional(&state.db)
         .await;
 
-    let user_id = match user_id_result {
-        Ok(Some(id)) => Some(id),
-        Ok(None) => {
-            println!("ParsePath: User '{}' not found in DB (query returned None)", username);
-            None
-        },
-        Err(e) => {
-            println!("ParsePath: DB Error looking up user '{}': {}", username, e);
-            None
-        }
+    let (user_id, virtual_path) = match user_id_result {
+        Ok(Some(id)) => (id, format!("/{}", virtual_rel_path)),
+        _ => return None,
     };
 
-    if user_id.is_none() {
-        return None;
-    }
-
-    let user_id = user_id?;
-
     // Construct Virtual Path info
-    let virtual_path = format!("/{}", virtual_rel_path);
     let parent_dir = Path::new(&virtual_path)
         .parent()
         .unwrap_or(Path::new("/"))
@@ -322,44 +310,43 @@ async fn handle_upsert(state: &AppState, path: &Path) {
 }
 
 async fn handle_delete(state: &AppState, path: &Path) {
-    // Note: for delete, we can't get metadata like size/is_dir easily if it's gone.
-    // But parse_path tries to read metadata.
-    // So we need a simplified parse logic for delete that doesn't check metadata or existence.
-    // However, parse_path mostly just needs path string and DB lookup for user.
-    // We can modify parse_path or just do manual parsing here.
+    let storage_base = PathBuf::from(&state.storage_path).join("vol1/User");
     
-    let path_str = path.to_string_lossy();
-    let storage_base = format!("{}/vol1/User/", state.storage_path);
+    let rel_path = match path.strip_prefix(&storage_base) {
+        Ok(p) => p.to_string_lossy(),
+        Err(_) => return,
+    };
     
-    if !path_str.starts_with(&storage_base) { return; }
-    let rel_path = &path_str[storage_base.len()..];
-    let parts: Vec<&str> = rel_path.splitn(2, '/').collect();
+    let parts: Vec<&str> = rel_path.split('/').collect();
     if parts.is_empty() { return; }
-    let username = parts[0];
-    let virtual_rel_path = if parts.len() > 1 { parts[1] } else { "" };
     
     if is_hidden(path) { return; }
 
+    let username = parts[0];
+    let virtual_rel_path = if parts.len() > 1 { parts[1..].join("/") } else { "".to_string() };
+    
     let user_id: Option<Uuid> = sqlx::query_scalar("select id from users where username = $1")
         .bind(username)
         .fetch_optional(&state.db)
         .await
         .unwrap_or(None);
         
-    if let Some(uid) = user_id {
-        let virtual_path = format!("/{}", virtual_rel_path);
-        let parent_dir = Path::new(&virtual_path).parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
-        let parent_dir = if parent_dir == "/" { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
-        let name = Path::new(&virtual_path).file_name().unwrap_or_default().to_string_lossy().to_string();
+    let (user_id, virtual_path) = match user_id {
+        Some(uid) => (uid, format!("/{}", virtual_rel_path)),
+        None => return,
+    };
         
-        if !name.is_empty() {
-            let _ = sqlx::query("DELETE FROM cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3")
-                .bind(&uid)
-                .bind(&parent_dir)
-                .bind(&name)
-                .execute(&state.db)
-                .await;
-        }
+    let parent_dir = Path::new(&virtual_path).parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
+    let parent_dir = if parent_dir == "/" { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
+    let name = Path::new(&virtual_path).file_name().unwrap_or_default().to_string_lossy().to_string();
+    
+    if !name.is_empty() {
+        let _ = sqlx::query("DELETE FROM cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3")
+            .bind(&user_id)
+            .bind(&parent_dir)
+            .bind(&name)
+            .execute(&state.db)
+            .await;
     }
 }
 
@@ -371,7 +358,12 @@ async fn handle_move(state: &AppState, from: &Path, to: &Path) {
     // Parse From
     let path_str_from = from.to_string_lossy();
     let storage_base = format!("{}/vol1/User/", state.storage_path);
-    if !path_str_from.starts_with(&storage_base) { return; }
+    if !path_str_from.starts_with(&storage_base) {
+        // Not a User file move (e.g. AppData). Fallback to Delete + Upsert
+        handle_delete(state, from).await;
+        handle_upsert(state, to).await;
+        return; 
+    }
     let rel_path_from = &path_str_from[storage_base.len()..];
     let parts_from: Vec<&str> = rel_path_from.splitn(2, '/').collect();
     let username_from = parts_from[0];
