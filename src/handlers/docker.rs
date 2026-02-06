@@ -61,7 +61,7 @@ fn docker_client() -> Docker {
     Docker::connect_with_local_defaults().unwrap()
 }
 
-fn nix_current_uid() -> Result<u32, ()> {
+fn nix_current_uid() -> Result<u32, String> {
     #[cfg(unix)]
     {
         let uid = unsafe { libc::getuid() };
@@ -69,7 +69,7 @@ fn nix_current_uid() -> Result<u32, ()> {
     }
     #[cfg(not(unix))]
     {
-        Err(())
+        Err("Unsupported platform".to_string())
     }
 }
 
@@ -159,7 +159,7 @@ pub async fn list_containers(State(_st): State<AppState>) -> impl IntoResponse {
                 .collect();
             Json(items).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e.to_string() }))).into_response(),
     }
 }
 
@@ -197,7 +197,7 @@ pub async fn list_images(State(_st): State<AppState>) -> impl IntoResponse {
             }
             Json(items).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e.to_string() }))).into_response(),
     }
 }
 
@@ -216,7 +216,7 @@ pub async fn list_volumes(State(_st): State<AppState>) -> impl IntoResponse {
                 .collect();
             Json(items).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e.to_string() }))).into_response(),
     }
 }
 
@@ -259,7 +259,7 @@ pub async fn list_networks(State(_st): State<AppState>) -> impl IntoResponse {
                 .collect();
             Json(items).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e.to_string() }))).into_response(),
     }
 }
 
@@ -477,8 +477,24 @@ pub struct PortMapping {
     container: String,
 }
 
-pub async fn create_container(State(_st): State<AppState>, Json(req): Json<CreateContainerReq>) -> impl IntoResponse {
+use uuid::Uuid;
+
+use std::os::unix::fs::PermissionsExt;
+
+pub async fn create_container(State(st): State<AppState>, Json(req): Json<CreateContainerReq>) -> impl IntoResponse {
     let docker = docker_client();
+    
+    // Determine container name to ensure storage isolation
+    // If name is not provided, generate a unique one
+    let container_name = match &req.name {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ => format!("pnas-{}", Uuid::new_v4().simple())
+    };
+
+    // Sanitize container name to prevent path traversal
+    if container_name.contains("..") || container_name.contains('/') || container_name.contains('\\') {
+        return (StatusCode::BAD_REQUEST, "Invalid container name".to_string()).into_response();
+    }
     
     let mut host_config = HostConfig {
         ..Default::default()
@@ -493,13 +509,13 @@ pub async fn create_container(State(_st): State<AppState>, Json(req): Json<Creat
     }
     
     let mut exposed_ports = std::collections::HashMap::new();
-    if let Some(ports) = req.ports {
+    if let Some(ports) = &req.ports {
         let mut port_bindings = std::collections::HashMap::new();
         for p in ports {
-            let key = format!("{}/tcp", p.container);
+            let key = format!("{}/tcp", p.container.trim());
             let bindings = vec![bollard::models::PortBinding {
                 host_ip: None,
-                host_port: Some(p.host),
+                host_port: Some(p.host.trim().to_string()),
             }];
             port_bindings.insert(key.clone(), Some(bindings));
             exposed_ports.insert(key, std::collections::HashMap::new());
@@ -507,12 +523,74 @@ pub async fn create_container(State(_st): State<AppState>, Json(req): Json<Creat
         host_config.port_bindings = Some(port_bindings);
     }
     
-    if let Some(volumes) = req.volumes {
-        host_config.binds = Some(volumes);
+    if let Some(volumes) = &req.volumes {
+        let mut new_volumes = Vec::new();
+        // Use resolved container name as app scope
+
+        for v in volumes {
+            // Parse volume string "host:container[:mode]"
+            let parts: Vec<&str> = v.split(':').collect();
+            if parts.len() < 2 {
+                continue; 
+            }
+            
+            let host_part = parts[0].trim();
+            
+            // Security check for directory traversal using path components
+            let path = std::path::Path::new(host_part);
+            for component in path.components() {
+                if let std::path::Component::ParentDir = component {
+                    return (StatusCode::BAD_REQUEST, "Directory traversal detected in volume path".to_string()).into_response();
+                }
+            }
+
+            let container_part = parts[1].trim();
+            let mode = if parts.len() > 2 { Some(parts[2].trim()) } else { None };
+            
+            // Construct isolated path: {storage_path}/vol1/AppData/{container_name}/{host_part}
+            let rel_host = host_part.trim_start_matches('/');
+            let new_host_path = std::path::Path::new(&st.storage_path)
+                .join("vol1/AppData")
+                .join(&container_name)
+                .join(rel_host);
+                
+            // Ensure directory exists
+            if let Err(e) = std::fs::create_dir_all(&new_host_path) {
+                eprintln!("Failed to create volume directory {:?}: {}", new_host_path, e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create volume directory: {}", e)).into_response();
+            }
+
+            // Set permissions to 777 to allow any container user (root or non-root) to write
+            // This is necessary because we use "keep-id" which might map users in a way that prevents writing to host-owned dirs
+            if let Err(e) = std::fs::set_permissions(&new_host_path, std::fs::Permissions::from_mode(0o777)) {
+                eprintln!("Failed to set permissions for volume directory {:?}: {}", new_host_path, e);
+            }
+
+            // Apply SELinux label 'Z' to allow container access
+            let mode_str = if let Some(m) = mode {
+                if m.contains('Z') || m.contains('z') {
+                    m.to_string()
+                } else {
+                    format!("{},Z", m)
+                }
+            } else {
+                "Z".to_string()
+            };
+
+            let new_vol_str = format!("{}:{}:{}", new_host_path.to_string_lossy(), container_part, mode_str);
+            new_volumes.push(new_vol_str);
+        }
+        
+        host_config.binds = Some(new_volumes);
+        // Enable keep-id to map container user to host user for permission access
+        host_config.userns_mode = Some("keep-id".to_string());
+    } else {
+        // Even without volumes, keep-id is good practice for rootless
+        host_config.userns_mode = Some("keep-id".to_string());
     }
     
     let mut config = Config {
-        image: Some(req.image_id),
+        image: Some(req.image_id.trim().to_string()),
         host_config: Some(host_config),
         ..Default::default()
     };
@@ -525,14 +603,11 @@ pub async fn create_container(State(_st): State<AppState>, Json(req): Json<Creat
         config.env = Some(env);
     }
     
-    let options: Option<CreateContainerOptions<String>> = if let Some(name) = req.name {
-        Some(CreateContainerOptions {
-            name,
-            ..Default::default()
-        })
-    } else {
-        None
-    };
+    // Always use the resolved container_name
+    let options = Some(CreateContainerOptions {
+        name: container_name,
+        ..Default::default()
+    });
     
     let res = docker.create_container(options, config).await;
     
@@ -542,6 +617,9 @@ pub async fn create_container(State(_st): State<AppState>, Json(req): Json<Creat
             let _ = docker.start_container(&id, None::<StartContainerOptions<String>>).await;
             Json(serde_json::json!({ "ok": true, "id": id })).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            eprintln!("Create container error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }

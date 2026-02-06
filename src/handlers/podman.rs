@@ -198,56 +198,60 @@ pub struct IdPayload {
 pub async fn start_container(State(_st): State<AppState>, Json(payload): Json<IdPayload>) -> Response {
     let path = format!("/containers/{}/start", payload.id);
     match call_podman(Method::POST, &path, None).await {
-        Ok((status, _)) => {
+        Ok((status, body)) => {
             if status.is_success() || status == StatusCode::NOT_MODIFIED {
                 Json(serde_json::json!({ "ok": true })).into_response()
             } else {
-                (status, Json(serde_json::json!({ "ok": false }))).into_response()
+                let msg = String::from_utf8_lossy(&body);
+                (status, Json(serde_json::json!({ "message": msg }))).into_response()
             }
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e }))).into_response(),
     }
 }
 
 pub async fn stop_container(State(_st): State<AppState>, Json(payload): Json<IdPayload>) -> Response {
     let path = format!("/containers/{}/stop", payload.id);
     match call_podman(Method::POST, &path, Some("timeout=10")).await {
-        Ok((status, _)) => {
+        Ok((status, body)) => {
             if status.is_success() || status == StatusCode::NOT_MODIFIED {
                 Json(serde_json::json!({ "ok": true })).into_response()
             } else {
-                (status, Json(serde_json::json!({ "ok": false }))).into_response()
+                let msg = String::from_utf8_lossy(&body);
+                (status, Json(serde_json::json!({ "message": msg }))).into_response()
             }
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e }))).into_response(),
     }
 }
 
 pub async fn restart_container(State(_st): State<AppState>, Json(payload): Json<IdPayload>) -> Response {
     let path = format!("/containers/{}/restart", payload.id);
     match call_podman(Method::POST, &path, Some("timeout=5")).await {
-        Ok((status, _)) => {
+        Ok((status, body)) => {
             if status.is_success() {
                 Json(serde_json::json!({ "ok": true })).into_response()
             } else {
-                (status, Json(serde_json::json!({ "ok": false }))).into_response()
+                let msg = String::from_utf8_lossy(&body);
+                (status, Json(serde_json::json!({ "message": msg }))).into_response()
             }
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e }))).into_response(),
     }
 }
 
 pub async fn remove_container(State(_st): State<AppState>, Json(payload): Json<IdPayload>) -> Response {
     let path = format!("/containers/{}", payload.id);
     match call_podman(Method::DELETE, &path, Some("force=true")).await {
-        Ok((status, _)) => {
+        Ok((status, body)) => {
             if status.is_success() {
                 Json(serde_json::json!({ "ok": true })).into_response()
             } else {
-                (status, Json(serde_json::json!({ "ok": false }))).into_response()
+                let msg = String::from_utf8_lossy(&body);
+                (status, Json(serde_json::json!({ "message": msg }))).into_response()
             }
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "message": e }))).into_response(),
     }
 }
 
