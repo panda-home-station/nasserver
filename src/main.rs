@@ -7,6 +7,7 @@ mod models;
 mod handlers;
 mod middleware;
 mod routes;
+mod watcher;
 
 use state::{AppState, DEVICE_CODES};
 
@@ -251,6 +252,9 @@ async fn main() {
         torrent_session: session,
         magnet_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
+
+    // Start filesystem watcher to sync DB with disk changes
+    watcher::init(state.clone()).await;
 
     let api = routes::api_app(state.clone());
 

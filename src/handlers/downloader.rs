@@ -1,5 +1,6 @@
+use sqlx::Row;
 use axum::{
-    extract::{Path, State, Extension},
+    extract::{Path as AxumPath, State, Extension},
     response::{IntoResponse, Json},
     http::StatusCode,
 };
@@ -14,6 +15,64 @@ use serde::Serialize;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, ManagedTorrent, Api, ByteBufOwned};
 use librqbit::dht::Id20;
 use std::str::FromStr;
+use std::path::Path;
+
+// Helper to extract user_id from path and query DB
+async fn get_user_id_from_path(state: &AppState, path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    // Path format: .../vol1/User/{username}/...
+    if let Some(idx) = parts.iter().position(|&x| x == "User") {
+        if idx + 1 < parts.len() {
+            let username = parts[idx + 1];
+            // Query users table
+            if let Ok(row) = sqlx::query("select id from users where username = $1")
+                .bind(username)
+                .fetch_one(&state.db)
+                .await 
+            {
+                return row.try_get("id").ok();
+            }
+        }
+    }
+    None
+}
+
+// Helper to sync file to cloud_files DB
+async fn sync_file_to_db(state: &AppState, user_id: &str, physical_path: &Path, virtual_dir: &str) {
+    if !physical_path.exists() { return; }
+    
+    let name = physical_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let size = tokio::fs::metadata(physical_path).await.map(|m: std::fs::Metadata| m.len()).unwrap_or(0);
+    
+    // Check existence
+    let exists: bool = sqlx::query_scalar("select count(*) > 0 from cloud_files where user_id = $1 and dir = $2 and name = $3")
+        .bind(user_id)
+        .bind(virtual_dir)
+        .bind(&name)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false);
+        
+    if exists {
+        let _ = sqlx::query("update cloud_files set size = $1, updated_at = datetime('now') where user_id = $2 and dir = $3 and name = $4")
+            .bind(size as i64)
+            .bind(user_id)
+            .bind(virtual_dir)
+            .bind(&name)
+            .execute(&state.db)
+            .await;
+    } else {
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, 'file', datetime('now'), datetime('now'))")
+            .bind(id)
+            .bind(user_id)
+            .bind(&name)
+            .bind(virtual_dir)
+            .bind(size as i64)
+            .execute(&state.db)
+            .await;
+    }
+}
 
 const DEFAULT_TRACKERS: &[&str] = &[
     "udp://tracker.opentrackr.org:1337/announce",
@@ -268,9 +327,10 @@ pub async fn create_download(State(state): State<AppState>, Extension(user): Ext
         let id_clone = id.clone();
         let url_clone = url.clone();
         let save_dir_clone = save_dir.clone();
+        let user_id_clone = user.user_id.to_string();
 
         let handle = tokio::spawn(async move {
-            download_magnet_process(state_clone, id_clone, url_clone, save_dir_clone).await;
+            download_magnet_process(state_clone, id_clone, url_clone, save_dir_clone, user_id_clone).await;
         });
 
         if let Ok(mut tasks) = state.download_tasks.lock() {
@@ -337,11 +397,12 @@ pub async fn create_download(State(state): State<AppState>, Extension(user): Ext
     let id_clone = id.clone();
     let url_clone = url.clone();
     let path_clone = path.clone();
+    let user_id_clone = user.user_id.to_string();
 
     println!("[Downloader] Spawning task: id='{}', url='{}', path='{}'", id_clone, url_clone, path_clone);
 
     let handle = tokio::spawn(async move {
-        download_process(state_clone, id_clone, url_clone, path_clone).await;
+        download_process(state_clone, id_clone, url_clone, path_clone, user_id_clone).await;
     });
     
     // Store abort handle
@@ -400,7 +461,11 @@ pub async fn resolve_magnet(State(state): State<AppState>, Json(payload): Json<R
 
 use librqbit_core::torrent_metainfo::torrent_from_bytes;
 
-pub async fn start_magnet_download(State(state): State<AppState>, Extension(user): Extension<AuthUser>, Json(payload): Json<StartMagnetDownloadReq>) -> impl IntoResponse {
+pub async fn start_magnet_download(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(payload): Json<StartMagnetDownloadReq>,
+) -> impl IntoResponse {
     let torrent_bytes = {
         let cache = state.magnet_cache.lock().unwrap();
         match cache.get(&payload.token) {
@@ -500,9 +565,18 @@ pub async fn start_magnet_download(State(state): State<AppState>, Extension(user
                 
                 let state_clone = state.clone();
                 let id_clone = id.clone();
+                let user_id_clone = user.user_id.to_string();
+                let save_dir_clone = save_dir.clone();
+                let username_clone = user.username.clone();
                 
                 let abort_handle = tokio::spawn(async move {
-                    monitor_torrent_process(state_clone, id_clone, handle).await;
+                    let prefix = format!("{}/vol1/User/{}", state_clone.storage_path, username_clone);
+                    let virtual_base_dir = if save_dir_clone.starts_with(&prefix) {
+                        save_dir_clone[prefix.len()..].to_string()
+                    } else {
+                        "/下载".to_string()
+                    };
+                    monitor_torrent_process(state_clone, id_clone, handle, user_id_clone, virtual_base_dir).await;
                 });
                 
                 if let Ok(mut tasks) = state.download_tasks.lock() {
@@ -522,7 +596,7 @@ pub async fn start_magnet_download(State(state): State<AppState>, Extension(user
     }
 }
 
-async fn monitor_torrent_process(state: AppState, id: String, handle: std::sync::Arc<ManagedTorrent>) {
+async fn monitor_torrent_process(state: AppState, id: String, handle: std::sync::Arc<ManagedTorrent>, user_id: String, virtual_base_dir: String) {
     // Update status to downloading (already done in handler, but good to ensure)
     let _ = sqlx::query("update downloads set status = 'downloading' where id = $1")
         .bind(&id)
@@ -558,12 +632,44 @@ async fn monitor_torrent_process(state: AppState, id: String, handle: std::sync:
         .execute(&state.db)
         .await;
 
+    // Sync to cloud_files
+    // We need to iterate over files in the torrent and add them to DB
+    let api = Api::new(state.torrent_session.clone(), None);
+    if let Ok(details) = api.api_torrent_details(librqbit::api::TorrentIdOrHash::Hash(handle.info_hash())) {
+         if let Some(files) = details.files {
+            // Need username
+            let username = sqlx::query_scalar::<_, String>("select username from users where id = $1")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or_default();
+                
+            if !username.is_empty() {
+                let physical_base = format!("{}/vol1/User/{}{}", state.storage_path, username, virtual_base_dir);
+                let base_path = Path::new(&physical_base);
+                
+                for file in files {
+                     let relative_path_str = file.name;
+                     let relative_path = Path::new(&relative_path_str);
+                     let full_physical_path = base_path.join(relative_path);
+                     
+                     let full_virtual_path_buf = Path::new(&virtual_base_dir).join(relative_path);
+                     let virtual_dir = full_virtual_path_buf.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
+                     let virtual_dir = if virtual_dir.starts_with('/') { virtual_dir } else { format!("/{}", virtual_dir) };
+                     
+                     ensure_directory_exists(&state, &user_id, &virtual_dir).await;
+                     sync_file_to_db(&state, &user_id, &full_physical_path, &virtual_dir).await;
+                }
+            }
+         }
+    }
+
     if let Ok(mut tasks) = state.download_tasks.lock() {
         tasks.remove(&id);
     }
 }
 
-async fn download_magnet_process(state: AppState, id: String, url: String, save_dir: String) {
+async fn download_magnet_process(state: AppState, id: String, url: String, save_dir: String, user_id: String) {
     let url = enrich_magnet_link(&url);
     println!("[Downloader] Magnet process started for id={}", id);
 
@@ -586,10 +692,15 @@ async fn download_magnet_process(state: AppState, id: String, url: String, save_
         }
     };
     
-    monitor_torrent_process(state, id, handle).await;
+    let virtual_base_dir = if let Some(idx) = save_dir.find("/下载") {
+        save_dir[idx..].to_string()
+    } else {
+        "/下载".to_string()
+    };
+    monitor_torrent_process(state, id, handle, user_id, virtual_base_dir).await;
 }
 
-async fn download_process(state: AppState, id: String, url: String, path: String) {
+async fn download_process(state: AppState, id: String, url: String, path: String, user_id: String) {
     println!("[Downloader] Process started for id={}", id);
     
     // Check for existing file for resume
@@ -726,12 +837,17 @@ async fn download_process(state: AppState, id: String, url: String, path: String
         .execute(&state.db)
         .await;
 
+    // Sync file
+    let virtual_dir = "/下载";
+    let physical_path = Path::new(&path);
+    sync_file_to_db(&state, &user_id, physical_path, virtual_dir).await;
+
     if let Ok(mut tasks) = state.download_tasks.lock() {
         tasks.remove(&id);
     }
 }
 
-pub async fn pause_download(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn pause_download(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> impl IntoResponse {
     let handle_opt = if let Ok(mut tasks) = state.download_tasks.lock() {
         tasks.remove(&id)
     } else {
@@ -749,7 +865,7 @@ pub async fn pause_download(State(state): State<AppState>, Path(id): Path<String
     (StatusCode::NOT_FOUND, "Task not found or already stopped").into_response()
 }
 
-pub async fn resume_download(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn resume_download(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> impl IntoResponse {
     let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
         .bind(&id)
         .fetch_optional(&state.db)
@@ -770,14 +886,17 @@ pub async fn resume_download(State(state): State<AppState>, Path(id): Path<Strin
         let url_clone = task.url.clone();
         let path_clone = task.path.clone(); // This is full file path for http, directory for magnet?
         
+        let user_id = get_user_id_from_path(&state, &task.path).await.unwrap_or_default();
+        let user_id_clone = user_id.clone();
+        
         let handle = if url_clone.starts_with("magnet:?") {
              // For magnet, path is save_dir
              tokio::spawn(async move {
-                download_magnet_process(state_clone, id_clone, url_clone, path_clone).await;
+                download_magnet_process(state_clone, id_clone, url_clone, path_clone, user_id_clone).await;
             })
         } else {
              tokio::spawn(async move {
-                download_process(state_clone, id_clone, url_clone, path_clone).await;
+                download_process(state_clone, id_clone, url_clone, path_clone, user_id_clone).await;
             })
         };
 
@@ -791,7 +910,7 @@ pub async fn resume_download(State(state): State<AppState>, Path(id): Path<Strin
     (StatusCode::NOT_FOUND, "Task not found").into_response()
 }
 
-pub async fn delete_download(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn delete_download(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> impl IntoResponse {
     // Stop if running
     let handle_opt = if let Ok(mut tasks) = state.download_tasks.lock() {
         tasks.remove(&id)
@@ -819,13 +938,13 @@ pub async fn delete_download(State(state): State<AppState>, Path(id): Path<Strin
 #[axum::debug_handler]
 pub async fn control_download(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    AxumPath(id): AxumPath<String>,
     Json(payload): Json<ControlDownloadReq>
 ) -> impl IntoResponse {
     match payload.action.as_str() {
-        "pause" => pause_download(State(state), Path(id)).await.into_response(),
-        "resume" => resume_download(State(state), Path(id)).await.into_response(),
-        "delete" => delete_download(State(state), Path(id)).await.into_response(),
+        "pause" => pause_download(State(state), AxumPath(id)).await.into_response(),
+        "resume" => resume_download(State(state), AxumPath(id)).await.into_response(),
+        "delete" => delete_download(State(state), AxumPath(id)).await.into_response(),
         _ => (StatusCode::BAD_REQUEST, "Invalid action").into_response(),
     }
 }

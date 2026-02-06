@@ -96,7 +96,7 @@ pub async fn list(State(state): State<AppState>, Extension(user): Extension<Auth
             .await
     } else {
         sqlx::query("select id, name, storage, size, strftime('%s', coalesce(updated_at, created_at)) as ts from cloud_files where user_id = $1 and dir = $2 order by storage desc, name asc limit $3 offset $4")
-            .bind(user.user_id.to_string())
+            .bind(user.user_id)
             .bind(&dir)
             .bind(page_size)
             .bind(offset)
@@ -168,7 +168,7 @@ pub async fn mkdir(State(state): State<AppState>, Extension(user): Extension<Aut
             .unwrap_or(None)
     } else {
         sqlx::query_as("select 1 from cloud_files where user_id = $1 and dir = $2 and name = $3 and storage = 'dir' limit 1")
-            .bind(user.user_id.to_string())
+            .bind(user.user_id)
             .bind(&parent)
             .bind(&name)
             .fetch_optional(&state.db)
@@ -180,7 +180,7 @@ pub async fn mkdir(State(state): State<AppState>, Extension(user): Extension<Aut
         let id = uuid::Uuid::new_v4().to_string();
         let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage) values ($1, $2, $3, $4, 0, 'dir')")
             .bind(&id)
-            .bind(user.user_id.to_string())
+            .bind(user.user_id)
             .bind(&name)
             .bind(&parent)
             .execute(&state.db)
@@ -214,13 +214,15 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
                 Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
             };
             let target_file_path = parent_fs_path.join(&file_name);
+            let temp_file_name = format!(".{}.part", file_name);
+            let temp_file_path = parent_fs_path.join(&temp_file_name);
             
             if let Some(parent) = target_file_path.parent() {
                 let _ = tokio_fs::create_dir_all(parent).await;
             }
 
             let mut f = if offset > 0 {
-                match OpenOptions::new().write(true).create(true).open(&target_file_path).await {
+                match OpenOptions::new().write(true).create(true).open(&temp_file_path).await {
                     Ok(mut file) => {
                         if let Err(_) = file.seek(SeekFrom::Start(offset)).await {
                             return Json(serde_json::json!({ "ok": false, "error": "seek failed" }));
@@ -230,7 +232,7 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
                     Err(_) => return Json(serde_json::json!({ "ok": false, "error": "open failed" })),
                 }
             } else {
-                match tokio_fs::File::create(&target_file_path).await {
+                match tokio_fs::File::create(&temp_file_path).await {
                     Ok(h) => h,
                     Err(_) => return Json(serde_json::json!({ "ok": false, "error": "create failed" })),
                 }
@@ -244,7 +246,14 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
                 }
             }
 
-            let current_size = match tokio_fs::metadata(&target_file_path).await {
+            // Flush and sync to disk before renaming
+            if let Err(e) = f.sync_all().await {
+                 println!("Failed to sync file {}: {}", temp_file_name, e);
+                 return Json(serde_json::json!({ "ok": false, "error": "sync failed" }));
+            }
+            drop(f); // Ensure file is closed
+
+            let current_size = match tokio_fs::metadata(&temp_file_path).await {
                 Ok(m) => m.len(),
                 Err(_) => offset + written,
             };
@@ -255,49 +264,23 @@ pub async fn upload(State(state): State<AppState>, Extension(user): Extension<Au
                 }
             }
             
-            // Finished
-            let parent = normalize_path(&dest_path);
-            let uid = user.user_id.to_string();
-
-            // Check if exists
-            let exists = sqlx::query_as::<_, (String,)>("select id from cloud_files where user_id=$1 and dir=$2 and name=$3")
-                .bind(&uid)
-                .bind(&parent)
-                .bind(&file_name)
-                .fetch_optional(&state.db)
-                .await;
-
-            match exists {
-                Ok(Some((existing_id,))) => {
-                    // Update
-                    if let Err(e) = sqlx::query("update cloud_files set size=$1, updated_at=CURRENT_TIMESTAMP where id=$2")
-                        .bind(current_size as i64)
-                        .bind(&existing_id)
-                        .execute(&state.db)
-                        .await 
-                    {
-                        println!("Failed to update cloud_files for {}: {}", file_name, e);
-                    }
-                },
-                Ok(None) => {
-                    // Insert
-                    let id = uuid::Uuid::new_v4().to_string();
-                    if let Err(e) = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage) values ($1, $2, $3, $4, $5, '', 'file')")
-                        .bind(&id)
-                        .bind(&uid)
-                        .bind(&file_name)
-                        .bind(&parent)
-                        .bind(current_size as i64)
-                        .execute(&state.db)
-                        .await
-                    {
-                        println!("Failed to insert cloud_files for {}: {}", file_name, e);
-                    }
-                },
-                Err(e) => {
-                     println!("Failed to check existence for {}: {}", file_name, e);
+            // Finished: Atomic Rename
+            if let Err(e) = tokio_fs::rename(&temp_file_path, &target_file_path).await {
+                println!("Failed to rename temp file: {}", e);
+                return Json(serde_json::json!({ "ok": false, "error": "rename failed" }));
+            }
+            
+            // Sync parent directory to ensure rename is persisted
+            if let Some(parent) = target_file_path.parent() {
+                if let Ok(dir) = tokio_fs::File::open(parent).await {
+                    let _ = dir.sync_all().await;
                 }
             }
+
+            // Note: We no longer manually update the DB here.
+            // The filesystem watcher (watcher.rs) will detect the rename/create event
+            // and automatically sync the metadata to cloud_files.
+            // This ensures a single source of truth and prevents race conditions.
 
             return Json(serde_json::json!({ "ok": true, "done": true, "bytes": current_size }));
         }
@@ -317,7 +300,13 @@ pub async fn download(State(state): State<AppState>, Extension(user): Extension<
             .await 
         {
             let d: String = row.try_get("dir").unwrap_or_default();
-            let u: String = row.try_get("user_id").unwrap_or_default();
+            // user_id is stored as BLOB (Uuid) in DB, so try to read it as Uuid first, fallback to string if legacy
+            let u_uuid: Option<uuid::Uuid> = row.try_get("user_id").ok();
+            let u_str: String = if let Some(uid) = u_uuid {
+                uid.to_string()
+            } else {
+                 row.try_get("user_id").unwrap_or_default()
+            };
             
             // Check access
             if d.starts_with("/AppData") {
@@ -328,7 +317,7 @@ pub async fn download(State(state): State<AppState>, Extension(user): Extension<
                  }
             } else {
                  // Standard user file check
-                 if u != user.user_id.to_string() {
+                 if u_str != user.user_id.to_string() {
                      return Response::builder().status(404).body(Body::empty()).unwrap();
                  }
             }
@@ -420,7 +409,7 @@ pub async fn rename(State(state): State<AppState>, Extension(user): Extension<Au
                 .unwrap_or(None)
         } else {
             sqlx::query("select id, storage from cloud_files where user_id = $1 and dir = $2 and name = $3")
-                .bind(user.user_id.to_string())
+                .bind(user.user_id)
                 .bind(&parent)
                 .bind(&name)
                 .fetch_optional(&state.db)
@@ -550,7 +539,13 @@ pub async fn delete(State(state): State<AppState>, Extension(user): Extension<Au
             .bind(id).fetch_one(&state.db).await {
             
             let d: String = row.try_get("dir").unwrap_or_default();
-            let u: String = row.try_get("user_id").unwrap_or_default();
+            // user_id is stored as BLOB (Uuid) in DB, so try to read it as Uuid first, fallback to string if legacy
+            let u_uuid: Option<uuid::Uuid> = row.try_get("user_id").ok();
+            let u_str: String = if let Some(uid) = u_uuid {
+                uid.to_string()
+            } else {
+                 row.try_get("user_id").unwrap_or_default()
+            };
             
             // Check access
             if d.starts_with("/AppData") {
@@ -558,7 +553,7 @@ pub async fn delete(State(state): State<AppState>, Extension(user): Extension<Au
                      return Json(serde_json::json!({ "ok": false, "error": "access denied" }));
                  }
             } else {
-                 if u != user.user_id.to_string() {
+                 if u_str != user.user_id.to_string() {
                      return Json(serde_json::json!({ "ok": false, "error": "not found" }));
                  }
             }
@@ -590,7 +585,7 @@ pub async fn delete(State(state): State<AppState>, Extension(user): Extension<Au
                 .unwrap_or(None)
         } else {
             sqlx::query("select id, storage from cloud_files where user_id = $1 and dir = $2 and name = $3")
-                .bind(user.user_id.to_string())
+                .bind(user.user_id)
                 .bind(&parent)
                 .bind(&name)
                 .fetch_optional(&state.db)
