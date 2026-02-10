@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{State, Extension},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::state::AppState;
+use crate::models::auth::AuthUser;
 
 fn docker_client() -> Docker {
     if let Ok(host) = std::env::var("DOCKER_HOST") {
@@ -91,10 +92,11 @@ pub struct ImageInfo {
     size: i64,
     created: i64,
     exposed_ports: Vec<u16>,
+    env: Vec<String>,
+    volumes: Vec<String>,
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "PascalCase")]
 pub struct VolumeInfo {
     name: String,
     driver: String,
@@ -180,24 +182,36 @@ pub async fn list_images(State(_st): State<AppState>) -> impl IntoResponse {
         Ok(list) => {
             let mut items: Vec<ImageInfo> = Vec::new();
             for img in list {
-                let exposed_ports = if let Ok(inspect) = docker.inspect_image(&img.id).await {
-                    inspect.config
-                        .and_then(|config| config.exposed_ports)
+                let (exposed_ports, env, volumes) = if let Ok(inspect) = docker.inspect_image(&img.id).await {
+                    let config = inspect.config.unwrap_or_default();
+                    
+                    let ports = config.exposed_ports
                         .map(|ports| {
                             ports.keys()
                                 .filter_map(|k| k.split('/').next()?.parse::<u16>().ok())
                                 .collect()
                         })
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+
+                    let env = config.env.unwrap_or_default();
+                    
+                    let vols = config.volumes
+                        .map(|v| v.keys().cloned().collect())
+                        .unwrap_or_default();
+                        
+                    (ports, env, vols)
                 } else {
-                    Vec::new()
+                    (Vec::new(), Vec::new(), Vec::new())
                 };
+
                 items.push(ImageInfo {
                     id: img.id,
                     repo_tags: img.repo_tags,
                     size: img.size,
                     created: img.created,
                     exposed_ports,
+                    env,
+                    volumes,
                 });
             }
             Json(items).into_response()
@@ -475,6 +489,11 @@ pub struct CreateContainerReq {
     volumes: Option<Vec<String>>,
     env: Option<Vec<String>>,
     gpu_id: Option<String>,
+    privileged: Option<bool>,
+    cap_add: Option<Vec<String>>,
+    network_mode: Option<String>,
+    cmd: Option<Vec<String>>,
+    entrypoint: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -487,7 +506,7 @@ use uuid::Uuid;
 
 use std::os::unix::fs::PermissionsExt;
 
-pub async fn create_container(State(st): State<AppState>, Json(req): Json<CreateContainerReq>) -> impl IntoResponse {
+pub async fn create_container(State(st): State<AppState>, Extension(user): Extension<AuthUser>, Json(req): Json<CreateContainerReq>) -> impl IntoResponse {
     let docker = docker_client();
     
     // Determine container name to ensure storage isolation
@@ -505,6 +524,18 @@ pub async fn create_container(State(st): State<AppState>, Json(req): Json<Create
     let mut host_config = HostConfig {
         ..Default::default()
     };
+
+    if let Some(privileged) = req.privileged {
+        host_config.privileged = Some(privileged);
+    }
+
+    if let Some(cap_add) = &req.cap_add {
+        host_config.cap_add = Some(cap_add.clone());
+    }
+
+    if let Some(network_mode) = &req.network_mode {
+        host_config.network_mode = Some(network_mode.clone());
+    }
     
     if let Some(cpu) = req.cpu_limit {
         host_config.nano_cpus = Some((cpu * 1_000_000_000.0) as i64);
@@ -585,22 +616,35 @@ pub async fn create_container(State(st): State<AppState>, Json(req): Json<Create
             let container_part = parts[1].trim();
             let mode = if parts.len() > 2 { Some(parts[2].trim()) } else { None };
             
-            // Construct isolated path: {storage_path}/vol1/AppData/{container_name}/{host_part}
-            let rel_host = host_part.trim_start_matches('/');
-            let new_host_path = std::path::Path::new(&st.storage_path)
-                .join("vol1/AppData")
-                .join(&container_name)
-                .join(rel_host);
+            let new_host_path_buf;
+            
+            if host_part.starts_with('/') {
+                 // Bind mount: Resolve path using user context
+                 match crate::handlers::docs::resolve_path(&st, &user.username, host_part).await {
+                     Ok(p) => new_host_path_buf = p,
+                     Err(e) => return (StatusCode::FORBIDDEN, format!("Access denied to path {}: {}", host_part, e)).into_response(),
+                 }
+            } else {
+                 // Named volume: Pass through, but we need to put it in the list directly
+                 let mode_str = if let Some(m) = mode {
+                    if m.contains('Z') || m.contains('z') { m.to_string() } else { format!("{},Z", m) }
+                 } else { "Z".to_string() };
+                 
+                 new_volumes.push(format!("{}:{}:{}", host_part, container_part, mode_str));
+                 continue;
+            }
+
+            let new_host_path = new_host_path_buf.as_path();
                 
-            // Ensure directory exists
-            if let Err(e) = std::fs::create_dir_all(&new_host_path) {
+            // Ensure directory exists for bind mounts
+            if let Err(e) = tokio::fs::create_dir_all(&new_host_path).await {
                 eprintln!("Failed to create volume directory {:?}: {}", new_host_path, e);
                 return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create volume directory: {}", e)).into_response();
             }
 
             // Set permissions to 777 to allow any container user (root or non-root) to write
             // This is necessary because we use "keep-id" which might map users in a way that prevents writing to host-owned dirs
-            if let Err(e) = std::fs::set_permissions(&new_host_path, std::fs::Permissions::from_mode(0o777)) {
+            if let Err(e) = tokio::fs::set_permissions(&new_host_path, std::fs::Permissions::from_mode(0o777)).await {
                 eprintln!("Failed to set permissions for volume directory {:?}: {}", new_host_path, e);
             }
 
@@ -632,6 +676,14 @@ pub async fn create_container(State(st): State<AppState>, Json(req): Json<Create
         host_config: Some(host_config),
         ..Default::default()
     };
+
+    if let Some(cmd) = &req.cmd {
+        config.cmd = Some(cmd.clone());
+    }
+
+    if let Some(entrypoint) = &req.entrypoint {
+        config.entrypoint = Some(entrypoint.clone());
+    }
     
     if !exposed_ports.is_empty() {
         config.exposed_ports = Some(exposed_ports);
