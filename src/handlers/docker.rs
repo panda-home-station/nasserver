@@ -8,7 +8,7 @@ use bollard::container::{
     Config, CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions,
     StopContainerOptions,
 };
-use bollard::models::{HostConfig, PortBinding};
+use bollard::models::{HostConfig, PortBinding, DeviceMapping, DeviceRequest};
 use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use bollard::volume::ListVolumesOptions;
 use bollard::network::ListNetworksOptions;
@@ -128,6 +128,11 @@ pub struct NetworkIpam {
 pub struct NetworkIpamConfig {
     subnet: Option<String>,
     gateway: Option<String>,
+}
+
+pub async fn list_gpus(State(_st): State<AppState>) -> impl IntoResponse {
+    let gpus = crate::handlers::gpu::get_system_gpus();
+    Json(gpus).into_response()
 }
 
 pub async fn list_containers(State(_st): State<AppState>) -> impl IntoResponse {
@@ -469,6 +474,7 @@ pub struct CreateContainerReq {
     ports: Option<Vec<PortMapping>>,
     volumes: Option<Vec<String>>,
     env: Option<Vec<String>>,
+    gpu_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -508,6 +514,38 @@ pub async fn create_container(State(st): State<AppState>, Json(req): Json<Create
         host_config.memory = Some(mem * 1024 * 1024 * 1024);
     }
     
+    let mut extra_env = Vec::new();
+
+    if let Some(gpu_id) = &req.gpu_id {
+        let gpu_config = crate::handlers::gpu::resolve_gpu_config(gpu_id);
+        
+        if !gpu_config.device_requests.is_empty() {
+            let mut reqs = host_config.device_requests.take().unwrap_or_default();
+            reqs.extend(gpu_config.device_requests);
+            host_config.device_requests = Some(reqs);
+        }
+        
+        if !gpu_config.devices.is_empty() {
+             let mut devs = host_config.devices.take().unwrap_or_default();
+             devs.extend(gpu_config.devices);
+             host_config.devices = Some(devs);
+        }
+
+        if !gpu_config.security_opts.is_empty() {
+            let mut opts = host_config.security_opt.take().unwrap_or_default();
+            opts.extend(gpu_config.security_opts);
+            host_config.security_opt = Some(opts);
+        }
+
+        if !gpu_config.group_adds.is_empty() {
+            let mut groups = host_config.group_add.take().unwrap_or_default();
+            groups.extend(gpu_config.group_adds);
+            host_config.group_add = Some(groups);
+        }
+
+        extra_env.extend(gpu_config.env);
+    }
+
     let mut exposed_ports = std::collections::HashMap::new();
     if let Some(ports) = &req.ports {
         let mut port_bindings = std::collections::HashMap::new();
@@ -599,8 +637,11 @@ pub async fn create_container(State(st): State<AppState>, Json(req): Json<Create
         config.exposed_ports = Some(exposed_ports);
     }
     
-    if let Some(env) = req.env {
-        config.env = Some(env);
+    let mut final_env = req.env.unwrap_or_default();
+    final_env.extend(extra_env);
+    
+    if !final_env.is_empty() {
+        config.env = Some(final_env);
     }
     
     // Always use the resolved container_name
