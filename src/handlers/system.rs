@@ -137,19 +137,52 @@ pub async fn version() -> impl IntoResponse {
 pub async fn check_ports(Json(req): Json<PortCheckReq>) -> impl IntoResponse {
     let mut results = Vec::new();
     for port in req.ports {
-        let addr = format!("0.0.0.0:{}", port);
-        // Try to bind to the port to see if it's in use
-        let (in_use, error) = match std::net::TcpListener::bind(&addr) {
+        let addr_v4 = format!("0.0.0.0:{}", port);
+        let addr_v6 = format!("[::]:{}", port);
+        
+        let mut in_use = false;
+        let mut error_msg = None;
+
+        // Try v4
+        match std::net::TcpListener::bind(&addr_v4) {
             Ok(l) => {
                 drop(l);
-                (false, None)
-            },
-            Err(e) => {
-                println!("Port check failed for {}: {}", addr, e);
-                (true, Some(e.to_string()))
             }
-        };
-        results.push(PortStatus { port, in_use, error });
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    in_use = true;
+                    error_msg = Some(e.to_string());
+                } else {
+                    println!("Port check (v4) failed for {}: {}", addr_v4, e);
+                    // For non-AddrInUse errors, we don't definitively know if it's in use
+                    // But we should probably report the error
+                    error_msg = Some(e.to_string());
+                }
+            }
+        }
+
+        // Try v6 if v4 didn't already prove it's in use
+        if !in_use {
+            match std::net::TcpListener::bind(&addr_v6) {
+                Ok(l) => {
+                    drop(l);
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::AddrInUse {
+                        in_use = true;
+                        error_msg = Some(e.to_string());
+                    } else if e.kind() != std::io::ErrorKind::AddrNotAvailable {
+                        // Skip AddrNotAvailable (e.g. IPv6 disabled)
+                        println!("Port check (v6) failed for {}: {}", addr_v6, e);
+                        if error_msg.is_none() {
+                            error_msg = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        results.push(PortStatus { port, in_use, error: error_msg });
     }
     Json(PortCheckResp { results })
 }
