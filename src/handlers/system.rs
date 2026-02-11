@@ -139,8 +139,17 @@ pub async fn check_ports(Json(req): Json<PortCheckReq>) -> impl IntoResponse {
     for port in req.ports {
         let addr = format!("0.0.0.0:{}", port);
         // Try to bind to the port to see if it's in use
-        let in_use = std::net::TcpListener::bind(addr).is_err();
-        results.push(PortStatus { port, in_use });
+        let (in_use, error) = match std::net::TcpListener::bind(&addr) {
+            Ok(l) => {
+                drop(l);
+                (false, None)
+            },
+            Err(e) => {
+                println!("Port check failed for {}: {}", addr, e);
+                (true, Some(e.to_string()))
+            }
+        };
+        results.push(PortStatus { port, in_use, error });
     }
     Json(PortCheckResp { results })
 }

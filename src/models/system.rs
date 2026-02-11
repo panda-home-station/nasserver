@@ -84,4 +84,5 @@ pub struct PortCheckResp {
 pub struct PortStatus {
     pub port: u16,
     pub in_use: bool,
+    pub error: Option<String>,
 }
