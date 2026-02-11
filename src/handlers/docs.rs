@@ -10,7 +10,6 @@ use tokio::fs::{self as tokio_fs, OpenOptions};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use sqlx::Row;
-use serde::Deserialize;
 use mime_guess;
 
 use crate::state::AppState;
@@ -139,8 +138,8 @@ pub async fn list(State(state): State<AppState>, Extension(user): Extension<Auth
     let is_app_data = dir.starts_with("/AppData");
     
     let mut entries: Vec<DocsEntry> = Vec::new();
-    let mut has_more = false;
-    let mut next_offset = 0;
+    let has_more;
+    let next_offset;
 
     if is_app_data {
         // Physical listing for AppData
@@ -638,7 +637,7 @@ pub async fn rename(State(state): State<AppState>, Extension(user): Extension<Au
         // Note: old_prefix should not have trailing slash for exact match, 
         // but for children it needs checking.
         
-        let sql = format!(
+        let _sql = format!(
             "UPDATE cloud_files SET dir = '{}' || SUBSTR(dir, {} + 1) WHERE dir = '{}' OR dir LIKE '{}' || '/%'",
             new_prefix, old_prefix.len(), old_prefix, old_prefix
         );

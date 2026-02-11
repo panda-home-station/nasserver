@@ -301,7 +301,7 @@ async fn main() {
                 if let Ok(mut sys) = state_clone.sys.lock() {
                     sys.refresh_cpu();
                     sys.refresh_memory();
-                    cpu_usage = sys.global_cpu_info().cpu_usage();
+                    cpu_usage = sys.global_cpu_info().cpu_usage() as f64;
                     let total_mem = sys.total_memory();
                     if total_mem > 0 {
                         mem_usage = (sys.used_memory() as f64 / total_mem as f64) * 100.0;
@@ -319,16 +319,6 @@ async fn main() {
             } else { 0.0 };
 
             // Calculate disk R/W speed
-            let mut current_total_read = 0u64;
-            let mut current_total_write = 0u64;
-            for d in &new_disks {
-                // sysinfo 0.30+ Disk has is_removable() etc, but we want usage
-                // Note: sysinfo's Disk doesn't provide cumulative R/W directly in all versions.
-                // If it doesn't, we might need to skip this or use another way.
-                // In latest sysinfo, Disk doesn't have total_read_bytes.
-                // We might need to use System's process disk usage or other means.
-                // Actually, let's check if we can get it from /proc/diskstats on Linux.
-            }
             
             // Re-evaluating disk speed collection. If sysinfo doesn't support it easily, 
             // I'll check if I can use a simpler approach or just use 0 for now to keep the UI working.

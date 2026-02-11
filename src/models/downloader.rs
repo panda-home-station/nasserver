@@ -20,7 +20,7 @@ pub struct DownloadTask {
 #[derive(Debug, Deserialize)]
 pub struct CreateDownloadReq {
     pub url: String,
-    pub path: Option<String>,
+    pub _path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

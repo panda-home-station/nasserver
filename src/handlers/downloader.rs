@@ -7,12 +7,10 @@ use axum::{
 use crate::state::AppState;
 use crate::models::downloader::{DownloadTask, CreateDownloadReq, ControlDownloadReq, ResolveMagnetReq, ResolveMagnetResp, StartMagnetDownloadReq, TorrentFileMetadata};
 use crate::models::auth::AuthUser;
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use std::time::Instant;
-use crate::handlers::docs::{resolve_path, normalize_path};
 use serde::Serialize;
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, ManagedTorrent, Api, ByteBufOwned};
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Api, ByteBufOwned};
 use librqbit::dht::Id20;
 use std::str::FromStr;
 use std::path::Path;

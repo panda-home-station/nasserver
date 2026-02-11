@@ -246,7 +246,7 @@ fn get_vulkan_gpus() -> Result<Vec<GpuInfo>, Box<dyn std::error::Error>> {
         // For simplicity, we can assume if it's not available, we skip PCI ID.
         
         // We will try to construct a unique ID.
-        let mut id = String::new();
+        let id;
         
         if vendor == "NVIDIA" {
              // For NVIDIA, we prefer UUID.

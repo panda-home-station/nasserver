@@ -6,7 +6,7 @@ use axum::{
 };
 use reqwest::Client;
 
-use crate::models::agent::{ChatRequest, ChatResponse};
+use crate::models::agent::ChatRequest;
 use crate::state::AppState;
 
 pub async fn chat(

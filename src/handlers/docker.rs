@@ -8,14 +8,13 @@ use bollard::container::{
     Config, CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions,
     StopContainerOptions,
 };
-use bollard::models::{HostConfig, PortBinding, DeviceMapping, DeviceRequest};
+use bollard::models::HostConfig;
 use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use bollard::volume::ListVolumesOptions;
 use bollard::network::ListNetworksOptions;
 use bollard::Docker;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 
 use crate::state::AppState;
 use crate::models::auth::AuthUser;
@@ -418,7 +417,7 @@ pub async fn pull_image(State(st): State<AppState>, Json(req): Json<PullReq>) ->
     let mut used: Option<String> = None;
     let mut last_err: Option<String> = None;
     for (from_image, source) in candidates {
-        let src_name = source.clone().unwrap_or_else(|| "docker.io".to_string());
+        let _src_name = source.clone().unwrap_or_else(|| "docker.io".to_string());
         let mut stream = docker.create_image(
             Some(CreateImageOptions {
                 from_image,
@@ -479,6 +478,7 @@ pub async fn remove_image(State(_st): State<AppState>, Json(req): Json<IdReq>) -
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct CreateContainerReq {
     image_id: String,
     name: Option<String>,

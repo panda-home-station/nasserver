@@ -12,7 +12,6 @@ use local_ip_address::local_ip;
 
 use crate::state::{AppState, START_TIME};
 use crate::models::system::{InitStateResp, InitReq, DeviceInfoResp, DiskUsage, HardwareInfo, NetworkInfo, HealthResp, VersionResp, PhysicalDisk, PortCheckReq, PortCheckResp, PortStatus, SystemStats, StatsHistoryQuery};
-use crate::handlers::gpu::get_gpu_usage;
 use axum::extract::Query;
 
 pub async fn get_current_stats(State(st): State<AppState>) -> impl IntoResponse {

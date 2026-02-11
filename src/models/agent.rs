@@ -13,6 +13,7 @@ pub struct ChatRequest {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct ChatResponse {
     pub reply: String,
 }

@@ -3,6 +3,9 @@ name = "pnas-server"
 version = "0.0.1"
 edition = "2021"
 
+[lints.rust]
+warnings = "deny"
+
 [dependencies]
 axum = { version = "0.7", features = ["macros", "json", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }

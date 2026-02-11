@@ -194,15 +194,18 @@ pub async fn hot(Query(params): Query<HotQuery>) -> impl IntoResponse {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct DockerSettings {
     pub mode: String,
     pub host: Option<String>,
 }
 
+#[allow(dead_code)]
 fn default_settings() -> DockerSettings {
     DockerSettings { mode: "none".to_string(), host: None }
 }
 
+#[allow(dead_code)]
 pub async fn get_settings(State(st): State<AppState>) -> impl IntoResponse {
     let v: Option<String> = sqlx::query_scalar("select value from system_config where key = 'docker_mirror'")
         .fetch_optional(&st.db)
@@ -217,6 +220,7 @@ pub async fn get_settings(State(st): State<AppState>) -> impl IntoResponse {
     Json(settings).into_response()
 }
 
+#[allow(dead_code)]
 pub async fn set_settings(State(st): State<AppState>, Json(payload): Json<DockerSettings>) -> impl IntoResponse {
     let mode = payload.mode.trim().to_lowercase();
     let allowed = ["none", "daocloud", "netease", "tencent", "aliyun", "custom"];
