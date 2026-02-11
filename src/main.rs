@@ -305,6 +305,8 @@ async fn main() {
             
             let mut cpu_usage = 0.0;
             let mut mem_usage = 0.0;
+            let mut mem_used = 0u64;
+            let mut mem_total = 0u64;
             let mut net_recv = 0.0;
             let mut net_sent = 0.0;
             let mut disk_read_kbps = 0.0;
@@ -316,9 +318,10 @@ async fn main() {
                     sys.refresh_cpu();
                     sys.refresh_memory();
                     cpu_usage = sys.global_cpu_info().cpu_usage() as f64;
-                    let total_mem = sys.total_memory();
-                    if total_mem > 0 {
-                        mem_usage = (sys.used_memory() as f64 / total_mem as f64) * 100.0;
+                    mem_total = sys.total_memory();
+                    mem_used = sys.used_memory();
+                    if mem_total > 0 {
+                        mem_usage = (mem_used as f64 / mem_total as f64) * 100.0;
                     }
                 }
             }
@@ -382,13 +385,17 @@ async fn main() {
                 }
             }
 
-            let (gpu_usage, gpu_memory_usage) = handlers::gpu::get_gpu_usage();
+            let gpu_stats = handlers::gpu::get_gpu_usage();
 
             let stats = crate::models::system::SystemStats {
                 cpu_usage,
                 memory_usage: mem_usage,
-                gpu_usage,
-                gpu_memory_usage,
+                memory_used: Some(mem_used as i64),
+                memory_total: Some(mem_total as i64),
+                gpu_usage: gpu_stats.usage,
+                gpu_memory_usage: gpu_stats.mem_usage,
+                gpu_memory_used: gpu_stats.mem_used,
+                gpu_memory_total: gpu_stats.mem_total,
                 net_recv_kbps: net_recv,
                 net_sent_kbps: net_sent,
                 disk_usage,

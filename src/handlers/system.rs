@@ -20,18 +20,65 @@ pub async fn get_current_stats(State(st): State<AppState>) -> impl IntoResponse 
             return Json(stats.clone());
         }
     }
-    
-    // Fallback if loop hasn't run yet
+
+    // Fallback if no last stats yet
+    let mut cpu_usage = 0.0;
+    let mut mem_usage = 0.0;
+    let mut mem_used = 0;
+    let mut mem_total = 0;
+    let mut net_recv = 0.0;
+    let mut net_sent = 0.0;
+    let mut disk_usage = 0.0;
+
+    {
+        if let Ok(mut sys) = st.sys.lock() {
+            sys.refresh_cpu();
+            sys.refresh_memory();
+            cpu_usage = sys.global_cpu_info().cpu_usage() as f64;
+            mem_total = sys.total_memory();
+            mem_used = sys.used_memory();
+            if mem_total > 0 {
+                mem_usage = (mem_used as f64 / mem_total as f64) * 100.0;
+            }
+        }
+    }
+
+    {
+        if let Ok(networks) = st.networks.lock() {
+            for (_name, data) in &*networks {
+                net_recv += data.received() as f64 / 1024.0;
+                net_sent += data.transmitted() as f64 / 1024.0;
+            }
+        }
+    }
+
+    {
+        if let Ok(disks) = st.disks.lock() {
+            if let Some(d) = disks.iter().find(|d| d.mount_point() == std::path::Path::new("/")) {
+                let total = d.total_space();
+                if total > 0 {
+                    disk_usage = ((total - d.available_space()) as f64 / total as f64) * 100.0;
+                }
+            }
+        }
+    }
+
+    let gpu_stats = crate::handlers::gpu::get_gpu_usage();
+
     Json(SystemStats {
-        cpu_usage: 0.0,
-        memory_usage: 0.0,
-        gpu_usage: None,
-        gpu_memory_usage: None,
-        net_recv_kbps: 0.0,
-        net_sent_kbps: 0.0,
-        disk_usage: 0.0,
-        disk_read_kbps: Some(0.0),
-        disk_write_kbps: Some(0.0),
+        cpu_usage,
+        memory_usage: mem_usage,
+        memory_used: Some(mem_used as i64),
+        memory_total: Some(mem_total as i64),
+        gpu_usage: gpu_stats.usage,
+        gpu_memory_usage: gpu_stats.mem_usage,
+        gpu_memory_used: gpu_stats.mem_used,
+        gpu_memory_total: gpu_stats.mem_total,
+        net_recv_kbps: net_recv,
+        net_sent_kbps: net_sent,
+        disk_usage,
+        disk_read_kbps: None,
+        disk_write_kbps: None,
         created_at: Some(Utc::now()),
     })
 }
@@ -45,7 +92,7 @@ pub async fn get_stats_history(
     let end = query.end.unwrap_or_else(|| Utc::now());
 
     let stats: Vec<SystemStats> = sqlx::query_as(
-        "select cpu_usage, memory_usage, gpu_usage, gpu_memory_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps, created_at 
+        "select cpu_usage, memory_usage, NULL as memory_used, NULL as memory_total, gpu_usage, gpu_memory_usage, NULL as gpu_memory_used, NULL as gpu_memory_total, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps, created_at 
          from system_stats 
          where created_at >= $1 and created_at <= $2 
          order by created_at desc 

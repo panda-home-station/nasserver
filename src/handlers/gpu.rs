@@ -146,9 +146,18 @@ fn find_render_node_by_pci(target_pci: &str) -> Option<String> {
     None
 }
 
-pub fn get_gpu_usage() -> (Option<f64>, Option<f64>) {
+pub struct GpuUsage {
+    pub usage: Option<f64>,
+    pub mem_usage: Option<f64>,
+    pub mem_used: Option<i64>,
+    pub mem_total: Option<i64>,
+}
+
+pub fn get_gpu_usage() -> GpuUsage {
     let mut gpu_util = None;
     let mut mem_util = None;
+    let mut mem_used = None;
+    let mut mem_total = None;
 
     // 1. Try NVIDIA (if exists)
     if std::path::Path::new("/dev/nvidia0").exists() {
@@ -161,12 +170,14 @@ pub fn get_gpu_usage() -> (Option<f64>, Option<f64>) {
                     let parts: Vec<&str> = first_line.split(',').map(|p| p.trim()).collect();
                     if parts.len() >= 3 {
                         gpu_util = parts[0].parse::<f64>().ok();
-                        let used_mem = parts[1].parse::<f64>().ok();
-                        let total_mem = parts[2].parse::<f64>().ok();
+                        let used = parts[1].parse::<f64>().ok();
+                        let total = parts[2].parse::<f64>().ok();
                         
-                        if let (Some(used), Some(total)) = (used_mem, total_mem) {
-                            if total > 0.0 {
-                                mem_util = Some((used / total) * 100.0);
+                        if let (Some(u), Some(t)) = (used, total) {
+                            mem_used = Some((u * 1024.0 * 1024.0) as i64); // nvidia-smi returns MiB
+                            mem_total = Some((t * 1024.0 * 1024.0) as i64);
+                            if t > 0.0 {
+                                mem_util = Some((u / t) * 100.0);
                             }
                         }
                     }
@@ -176,7 +187,12 @@ pub fn get_gpu_usage() -> (Option<f64>, Option<f64>) {
     }
 
     if gpu_util.is_some() {
-        return (gpu_util, mem_util);
+        return GpuUsage {
+            usage: gpu_util,
+            mem_usage: mem_util,
+            mem_used,
+            mem_total,
+        };
     }
 
     // 2. Try Intel/AMD (via sysfs)
@@ -192,7 +208,12 @@ pub fn get_gpu_usage() -> (Option<f64>, Option<f64>) {
         }
     }
 
-    (gpu_util, mem_util)
+    GpuUsage {
+        usage: gpu_util,
+        mem_usage: mem_util,
+        mem_used,
+        mem_total,
+    }
 }
 
 fn get_fallback_gpus() -> Vec<GpuInfo> {
