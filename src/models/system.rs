@@ -69,3 +69,19 @@ pub struct HealthResp {
 pub struct VersionResp {
     pub version: String,
 }
+
+#[derive(Deserialize)]
+pub struct PortCheckReq {
+    pub ports: Vec<u16>,
+}
+
+#[derive(Serialize)]
+pub struct PortCheckResp {
+    pub results: Vec<PortStatus>,
+}
+
+#[derive(Serialize)]
+pub struct PortStatus {
+    pub port: u16,
+    pub in_use: bool,
+}

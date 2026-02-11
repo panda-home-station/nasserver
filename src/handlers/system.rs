@@ -11,7 +11,7 @@ use uuid::Uuid;
 use local_ip_address::local_ip;
 
 use crate::state::{AppState, START_TIME};
-use crate::models::system::{InitStateResp, InitReq, DeviceInfoResp, DiskUsage, HardwareInfo, NetworkInfo, HealthResp, VersionResp, PhysicalDisk};
+use crate::models::system::{InitStateResp, InitReq, DeviceInfoResp, DiskUsage, HardwareInfo, NetworkInfo, HealthResp, VersionResp, PhysicalDisk, PortCheckReq, PortCheckResp, PortStatus};
 
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -132,6 +132,17 @@ pub async fn version() -> impl IntoResponse {
     Json(VersionResp {
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+pub async fn check_ports(Json(req): Json<PortCheckReq>) -> impl IntoResponse {
+    let mut results = Vec::new();
+    for port in req.ports {
+        let addr = format!("0.0.0.0:{}", port);
+        // Try to bind to the port to see if it's in use
+        let in_use = std::net::TcpListener::bind(addr).is_err();
+        results.push(PortStatus { port, in_use });
+    }
+    Json(PortCheckResp { results })
 }
 
 pub async fn init_state(State(st): State<AppState>) -> impl IntoResponse {

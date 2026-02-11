@@ -72,6 +72,7 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/system/init/state", get(system::init_state))
         .route("/api/system/init", post(system::init_system))
         .route("/api/system/device", get(system::get_device_info))
+        .route("/api/system/check_ports", post(system::check_ports))
         // Note: original code had /api/cloud/signup pointing to signup and /api/auth/signup pointing to auth_signup
         // but both called the same logic. Here we keep it consistent.
         // Assuming `signup` was for cloud registration and `auth_signup` for local user creation.
