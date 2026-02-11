@@ -26,6 +26,7 @@ pub async fn get_current_stats(State(st): State<AppState>) -> impl IntoResponse 
         cpu_usage: 0.0,
         memory_usage: 0.0,
         gpu_usage: None,
+        gpu_memory_usage: None,
         net_recv_kbps: 0.0,
         net_sent_kbps: 0.0,
         disk_usage: 0.0,
@@ -44,7 +45,7 @@ pub async fn get_stats_history(
     let end = query.end.unwrap_or_else(|| Utc::now());
 
     let stats: Vec<SystemStats> = sqlx::query_as(
-        "select cpu_usage, memory_usage, gpu_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps, created_at 
+        "select cpu_usage, memory_usage, gpu_usage, gpu_memory_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps, created_at 
          from system_stats 
          where created_at >= $1 and created_at <= $2 
          order by created_at desc 

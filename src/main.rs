@@ -216,6 +216,20 @@ async fn main() {
         .expect("Failed to create idx_cloud_files_checksum");
 
 
+    // Check if 'gpu_memory_usage' column exists before attempting to add it
+    let row_gpu_mem: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('system_stats') WHERE name = 'gpu_memory_usage'")
+        .fetch_one(&db)
+        .await
+        .expect("Failed to query pragma_table_info for system_stats table");
+
+    if row_gpu_mem.0 == 0 {
+        sqlx::query("ALTER TABLE system_stats ADD COLUMN gpu_memory_usage REAL")
+            .execute(&db)
+            .await
+            .expect("Failed to alter system_stats table to add gpu_memory_usage column");
+        println!("system_stats gpu_memory_usage column added");
+    }
+
     sqlx::query(
         "create table if not exists app_permissions (
             id integer primary key autoincrement,
@@ -368,10 +382,13 @@ async fn main() {
                 }
             }
 
+            let (gpu_usage, gpu_memory_usage) = handlers::gpu::get_gpu_usage();
+
             let stats = crate::models::system::SystemStats {
                 cpu_usage,
                 memory_usage: mem_usage,
-                gpu_usage: handlers::gpu::get_gpu_usage(),
+                gpu_usage,
+                gpu_memory_usage,
                 net_recv_kbps: net_recv,
                 net_sent_kbps: net_sent,
                 disk_usage,
@@ -386,10 +403,11 @@ async fn main() {
 
             // Record every 10 seconds
             if last_record.elapsed().as_secs() >= 10 {
-                let _ = sqlx::query("insert into system_stats (cpu_usage, memory_usage, gpu_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps) values ($1, $2, $3, $4, $5, $6, $7, $8)")
+                let _ = sqlx::query("insert into system_stats (cpu_usage, memory_usage, gpu_usage, gpu_memory_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)")
                     .bind(stats.cpu_usage)
                     .bind(stats.memory_usage)
                     .bind(stats.gpu_usage)
+                    .bind(stats.gpu_memory_usage)
                     .bind(stats.net_recv_kbps)
                     .bind(stats.net_sent_kbps)
                     .bind(stats.disk_usage)

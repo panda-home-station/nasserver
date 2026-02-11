@@ -92,6 +92,7 @@ pub struct SystemStats {
     pub cpu_usage: f64,
     pub memory_usage: f64,
     pub gpu_usage: Option<f64>,
+    pub gpu_memory_usage: Option<f64>,
     pub net_recv_kbps: f64,
     pub net_sent_kbps: f64,
     pub disk_usage: f64,

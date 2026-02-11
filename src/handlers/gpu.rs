@@ -146,19 +146,37 @@ fn find_render_node_by_pci(target_pci: &str) -> Option<String> {
     None
 }
 
-pub fn get_gpu_usage() -> Option<f64> {
+pub fn get_gpu_usage() -> (Option<f64>, Option<f64>) {
+    let mut gpu_util = None;
+    let mut mem_util = None;
+
     // 1. Try NVIDIA (if exists)
     if std::path::Path::new("/dev/nvidia0").exists() {
         if let Ok(output) = std::process::Command::new("nvidia-smi")
-            .args(&["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+            .args(&["--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
             .output() {
             if output.status.success() {
                 let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if let Ok(usage) = s.parse::<f64>() {
-                    return Some(usage);
+                if let Some(first_line) = s.lines().next() {
+                    let parts: Vec<&str> = first_line.split(',').map(|p| p.trim()).collect();
+                    if parts.len() >= 3 {
+                        gpu_util = parts[0].parse::<f64>().ok();
+                        let used_mem = parts[1].parse::<f64>().ok();
+                        let total_mem = parts[2].parse::<f64>().ok();
+                        
+                        if let (Some(used), Some(total)) = (used_mem, total_mem) {
+                            if total > 0.0 {
+                                mem_util = Some((used / total) * 100.0);
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+
+    if gpu_util.is_some() {
+        return (gpu_util, mem_util);
     }
 
     // 2. Try Intel/AMD (via sysfs)
@@ -168,15 +186,13 @@ pub fn get_gpu_usage() -> Option<f64> {
         let path = format!("/sys/class/drm/{}/device/gpu_busy_percent", node);
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(usage) = content.trim().parse::<f64>() {
-                return Some(usage);
+                gpu_util = Some(usage);
+                break;
             }
         }
-        
-        // Intel usage_stats (newer kernels/drivers)
-        // This is harder to parse without complex logic, skipping for now
     }
 
-    None
+    (gpu_util, mem_util)
 }
 
 fn get_fallback_gpus() -> Vec<GpuInfo> {
