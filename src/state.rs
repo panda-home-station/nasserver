@@ -21,5 +21,6 @@ pub struct AppState {
     pub download_tasks: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
     pub torrent_session: Arc<librqbit::Session>,
     pub magnet_cache: Arc<Mutex<HashMap<String, bytes::Bytes>>>,
+    pub last_stats: Arc<Mutex<Option<crate::models::system::SystemStats>>>,
 }
 

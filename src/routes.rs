@@ -63,6 +63,8 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/downloads/magnet/resolve", post(crate::handlers::downloader::resolve_magnet))
         .route("/api/downloads/magnet/start", post(crate::handlers::downloader::start_magnet_download))
         .route("/api/agent/chat", post(crate::handlers::agent::chat))
+        .route("/api/system/stats", get(system::get_current_stats))
+        .route("/api/system/stats/history", get(system::get_stats_history))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 

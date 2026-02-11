@@ -86,3 +86,23 @@ pub struct PortStatus {
     pub in_use: bool,
     pub error: Option<String>,
 }
+
+#[derive(Serialize, Clone, Debug, sqlx::FromRow)]
+pub struct SystemStats {
+    pub cpu_usage: f64,
+    pub memory_usage: f64,
+    pub gpu_usage: Option<f64>,
+    pub net_recv_kbps: f64,
+    pub net_sent_kbps: f64,
+    pub disk_usage: f64,
+    pub disk_read_kbps: Option<f64>,
+    pub disk_write_kbps: Option<f64>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Deserialize)]
+pub struct StatsHistoryQuery {
+    pub start: Option<chrono::DateTime<chrono::Utc>>,
+    pub end: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: Option<usize>,
+}

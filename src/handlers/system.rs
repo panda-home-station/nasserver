@@ -11,7 +11,55 @@ use uuid::Uuid;
 use local_ip_address::local_ip;
 
 use crate::state::{AppState, START_TIME};
-use crate::models::system::{InitStateResp, InitReq, DeviceInfoResp, DiskUsage, HardwareInfo, NetworkInfo, HealthResp, VersionResp, PhysicalDisk, PortCheckReq, PortCheckResp, PortStatus};
+use crate::models::system::{InitStateResp, InitReq, DeviceInfoResp, DiskUsage, HardwareInfo, NetworkInfo, HealthResp, VersionResp, PhysicalDisk, PortCheckReq, PortCheckResp, PortStatus, SystemStats, StatsHistoryQuery};
+use crate::handlers::gpu::get_gpu_usage;
+use axum::extract::Query;
+
+pub async fn get_current_stats(State(st): State<AppState>) -> impl IntoResponse {
+    if let Ok(last) = st.last_stats.lock() {
+        if let Some(stats) = &*last {
+            return Json(stats.clone());
+        }
+    }
+    
+    // Fallback if loop hasn't run yet
+    Json(SystemStats {
+        cpu_usage: 0.0,
+        memory_usage: 0.0,
+        gpu_usage: None,
+        net_recv_kbps: 0.0,
+        net_sent_kbps: 0.0,
+        disk_usage: 0.0,
+        disk_read_kbps: Some(0.0),
+        disk_write_kbps: Some(0.0),
+        created_at: Some(Utc::now()),
+    })
+}
+
+pub async fn get_stats_history(
+    State(st): State<AppState>,
+    Query(query): Query<StatsHistoryQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(100);
+    let start = query.start.unwrap_or_else(|| Utc::now() - chrono::Duration::hours(1));
+    let end = query.end.unwrap_or_else(|| Utc::now());
+
+    let stats: Vec<SystemStats> = sqlx::query_as(
+        "select cpu_usage, memory_usage, gpu_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps, created_at 
+         from system_stats 
+         where created_at >= $1 and created_at <= $2 
+         order by created_at desc 
+         limit $3"
+    )
+    .bind(start)
+    .bind(end)
+    .bind(limit as i64)
+    .fetch_all(&st.db)
+    .await
+    .unwrap_or_default();
+
+    Json(stats)
+}
 
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;

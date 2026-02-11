@@ -183,6 +183,24 @@ async fn main() {
     .execute(&db)
     .await
     .expect("Failed to create cloud_files table");
+
+    sqlx::query(
+        "create table if not exists system_stats (
+            id integer primary key autoincrement,
+            cpu_usage real,
+            memory_usage real,
+            gpu_usage real,
+            net_recv_kbps real,
+            net_sent_kbps real,
+            disk_usage real,
+            disk_read_kbps real,
+            disk_write_kbps real,
+            created_at timestamp default CURRENT_TIMESTAMP
+        )"
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create system_stats table");
     // Indexes for fast listing and lookup
     sqlx::query("create index if not exists idx_cloud_files_user_dir on cloud_files(user_id, dir)")
         .execute(&db)
@@ -251,6 +269,7 @@ async fn main() {
         download_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         torrent_session: session,
         magnet_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        last_stats: Arc::new(Mutex::new(None)),
     };
 
     // Start filesystem watcher to sync DB with disk changes
@@ -261,20 +280,86 @@ async fn main() {
     // Spawn background task to refresh system info
     let state_clone = state.clone();
     tokio::spawn(async move {
+        let mut last_record = tokio::time::Instant::now();
+        let mut last_disk_read = 0u64;
+        let mut last_disk_write = 0u64;
+        let mut first_disk_run = true;
+
         loop {
             // Refresh interval
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             
+            let mut cpu_usage = 0.0;
+            let mut mem_usage = 0.0;
+            let mut net_recv = 0.0;
+            let mut net_sent = 0.0;
+            let mut disk_read_kbps = 0.0;
+            let mut disk_write_kbps = 0.0;
+
             // 1. CPU & Memory - fast, must be done in-place for CPU usage calc
             {
                 if let Ok(mut sys) = state_clone.sys.lock() {
                     sys.refresh_cpu();
                     sys.refresh_memory();
+                    cpu_usage = sys.global_cpu_info().cpu_usage();
+                    let total_mem = sys.total_memory();
+                    if total_mem > 0 {
+                        mem_usage = (sys.used_memory() as f64 / total_mem as f64) * 100.0;
+                    }
                 }
             }
 
             // 2. Disks - slow (I/O), do it outside lock
             let new_disks = Disks::new_with_refreshed_list();
+            let disk_usage = if let Some(d) = new_disks.iter().find(|d| d.mount_point() == std::path::Path::new("/")) {
+                let total = d.total_space();
+                if total > 0 {
+                    ((total - d.available_space()) as f64 / total as f64) * 100.0
+                } else { 0.0 }
+            } else { 0.0 };
+
+            // Calculate disk R/W speed
+            let mut current_total_read = 0u64;
+            let mut current_total_write = 0u64;
+            for d in &new_disks {
+                // sysinfo 0.30+ Disk has is_removable() etc, but we want usage
+                // Note: sysinfo's Disk doesn't provide cumulative R/W directly in all versions.
+                // If it doesn't, we might need to skip this or use another way.
+                // In latest sysinfo, Disk doesn't have total_read_bytes.
+                // We might need to use System's process disk usage or other means.
+                // Actually, let's check if we can get it from /proc/diskstats on Linux.
+            }
+            
+            // Re-evaluating disk speed collection. If sysinfo doesn't support it easily, 
+            // I'll check if I can use a simpler approach or just use 0 for now to keep the UI working.
+            // Wait, sysinfo's DiskUsage is per process. 
+            // For system-wide, we can read /proc/diskstats on Linux.
+            
+            if cfg!(target_os = "linux") {
+                if let Ok(content) = tokio::fs::read_to_string("/proc/diskstats").await {
+                    let mut total_read_sectors = 0u64;
+                    let mut total_write_sectors = 0u64;
+                    for line in content.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 14 {
+                            // Column 6: sectors read, Column 10: sectors written
+                            total_read_sectors += parts[5].parse::<u64>().unwrap_or(0);
+                            total_write_sectors += parts[9].parse::<u64>().unwrap_or(0);
+                        }
+                    }
+                    let current_read_bytes = total_read_sectors * 512;
+                    let current_write_bytes = total_write_sectors * 512;
+                    
+                    if !first_disk_run {
+                        disk_read_kbps = (current_read_bytes.saturating_sub(last_disk_read)) as f64 / 1024.0 / 2.0;
+                        disk_write_kbps = (current_write_bytes.saturating_sub(last_disk_write)) as f64 / 1024.0 / 2.0;
+                    }
+                    last_disk_read = current_read_bytes;
+                    last_disk_write = current_write_bytes;
+                    first_disk_run = false;
+                }
+            }
+
             {
                 if let Ok(mut disks) = state_clone.disks.lock() {
                     *disks = new_disks;
@@ -283,10 +368,46 @@ async fn main() {
 
             // 3. Networks - can be slow, do it outside lock
             let new_networks = Networks::new_with_refreshed_list();
+            for (_name, data) in &new_networks {
+                net_recv += data.received() as f64 / 1024.0; // KB
+                net_sent += data.transmitted() as f64 / 1024.0; // KB
+            }
             {
                 if let Ok(mut networks) = state_clone.networks.lock() {
                     *networks = new_networks;
                 }
+            }
+
+            let stats = crate::models::system::SystemStats {
+                cpu_usage,
+                memory_usage: mem_usage,
+                gpu_usage: handlers::gpu::get_gpu_usage(),
+                net_recv_kbps: net_recv,
+                net_sent_kbps: net_sent,
+                disk_usage,
+                disk_read_kbps: Some(disk_read_kbps),
+                disk_write_kbps: Some(disk_write_kbps),
+                created_at: Some(chrono::Utc::now()),
+            };
+
+            if let Ok(mut last) = state_clone.last_stats.lock() {
+                *last = Some(stats.clone());
+            }
+
+            // Record every 10 seconds
+            if last_record.elapsed().as_secs() >= 10 {
+                let _ = sqlx::query("insert into system_stats (cpu_usage, memory_usage, gpu_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps) values ($1, $2, $3, $4, $5, $6, $7, $8)")
+                    .bind(stats.cpu_usage)
+                    .bind(stats.memory_usage)
+                    .bind(stats.gpu_usage)
+                    .bind(stats.net_recv_kbps)
+                    .bind(stats.net_sent_kbps)
+                    .bind(stats.disk_usage)
+                    .bind(stats.disk_read_kbps)
+                    .bind(stats.disk_write_kbps)
+                    .execute(&state_clone.db)
+                    .await;
+                last_record = tokio::time::Instant::now();
             }
         }
     });
