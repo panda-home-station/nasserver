@@ -1,7 +1,7 @@
 use axum::{extract::Query, extract::State, response::IntoResponse, Json};
 use serde::Deserialize;
 use axum::http::StatusCode;
-use crate::state::AppState;
+use infra::AppState;
 
 #[derive(Deserialize)]
 pub struct RegistrySearchQuery {

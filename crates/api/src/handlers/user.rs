@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::state::AppState;
+use infra::AppState;
 use models::auth::AuthUser;
 use axum::Extension;
 use common::core::Result;

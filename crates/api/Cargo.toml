@@ -1,0 +1,34 @@
+[package]
+name = "api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { workspace = true }
+models = { workspace = true }
+infra = { workspace = true }
+sqlx = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+fastrand = { workspace = true }
+urlencoding = { workspace = true }
+downloader = { workspace = true }
+storage = { workspace = true }
+container = { workspace = true }
+task = { workspace = true }
+agent = { workspace = true }
+auth = { workspace = true }
+system = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+jsonwebtoken = { workspace = true }
+mime_guess = { workspace = true }

@@ -7,7 +7,7 @@ use axum::{
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use uuid::Uuid;
 
-use crate::state::AppState;
+use infra::AppState;
 use models::auth::{Claims, AuthUser};
 
 pub async fn require_auth(State(st): State<AppState>, mut req: Request, next: Next) -> Result<Response, StatusCode> {

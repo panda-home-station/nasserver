@@ -3,7 +3,7 @@ use axum::{
     response::{IntoResponse, Json},
     http::StatusCode,
 };
-use crate::state::AppState;
+use infra::AppState;
 use models::downloader::{CreateDownloadReq, ControlDownloadReq, ResolveMagnetReq, StartMagnetDownloadReq, ResolveMagnetResp};
 use models::auth::AuthUser;
 use common::core::Result;

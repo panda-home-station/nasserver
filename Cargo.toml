@@ -11,6 +11,8 @@ members = [
     "crates/agent",
     "crates/gpu",
     "crates/server",
+    "crates/infra",
+    "crates/api",
 ]
 resolver = "2"
 
@@ -67,3 +69,5 @@ downloader = { path = "crates/downloader" }
 task = { path = "crates/task" }
 agent = { path = "crates/agent" }
 gpu = { path = "crates/gpu" }
+infra = { path = "crates/infra" }
+api = { path = "crates/api" }

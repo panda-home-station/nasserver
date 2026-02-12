@@ -2,7 +2,7 @@ use axum::{
     extract::{Extension, State},
     Json,
 };
-use crate::state::AppState;
+use infra::AppState;
 use models::auth::{SignupReq, SignupResp, LoginReq, LoginResp, AuthUser};
 use common::core::Result;
 

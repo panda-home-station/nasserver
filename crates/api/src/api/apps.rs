@@ -2,7 +2,7 @@ use axum::{
     extract::{State, Path},
     Json,
 };
-use crate::state::AppState;
+use infra::AppState;
 use common::core::Result;
 use models::domain::app::App;
 

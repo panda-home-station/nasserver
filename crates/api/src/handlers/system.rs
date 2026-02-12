@@ -2,7 +2,7 @@ use axum::{
     extract::{State, Query},
     Json,
 };
-use crate::state::AppState;
+use infra::AppState;
 use models::system::{InitReq, DeviceInfoResp, PortCheckReq, PortCheckResp, SystemStats, StatsHistoryQuery, InitStateResp};
 use common::core::Result;
 

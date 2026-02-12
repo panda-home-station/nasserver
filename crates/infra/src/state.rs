@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use once_cell::sync::Lazy;
 use sqlx::{Pool, Sqlite};
-// use sysinfo::{System, Disks, Networks, Components};
 use auth::AuthService;
 use system::SystemService;
 use storage::StorageService;
@@ -26,4 +25,3 @@ pub struct AppState {
     pub agent_service: Arc<dyn AgentService>,
     pub task_service: Arc<dyn TaskService>,
 }
-

@@ -5,7 +5,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 
-use crate::state::AppState;
+use infra::AppState;
 use models::device::{DeviceCodeResp, DeviceAuthReq, DeviceAuthResp};
 
 pub async fn device_code(State(st): State<AppState>) -> impl IntoResponse {

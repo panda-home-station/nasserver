@@ -1,5 +1,5 @@
 use axum::{
-    middleware,
+    middleware as axum_middleware,
     routing::{delete, get, post, get_service},
     Router,
     http::{Method, StatusCode},
@@ -8,7 +8,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use axum::extract::DefaultBodyLimit;
 
-use crate::state::AppState;
+use infra::AppState;
 use crate::handlers::{auth, system, device, docker, docs};
 use crate::api::apps;
 use crate::middleware::require_auth;
@@ -75,7 +75,7 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/apps/:id/stop", post(apps::stop_app))
         .route("/api/apps/:id", delete(apps::uninstall_app))
         .with_state(state.clone())
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+        .route_layer(axum_middleware::from_fn_with_state(state.clone(), require_auth));
 
     Router::new()
         .route("/health", get(system::health))
@@ -84,10 +84,6 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/system/init", post(system::init_system))
         .route("/api/system/device", get(system::get_device_info))
         .route("/api/system/check_ports", post(system::check_ports))
-        // Note: original code had /api/cloud/signup pointing to signup and /api/auth/signup pointing to auth_signup
-        // but both called the same logic. Here we keep it consistent.
-        // Assuming `signup` was for cloud registration and `auth_signup` for local user creation.
-        // In the handler implementation, both do the same thing (create user).
         .route("/api/cloud/signup", post(auth::signup)) 
         .route("/api/auth/signup", post(auth::auth_signup))
         .route("/api/auth/login", post(auth::auth_login))

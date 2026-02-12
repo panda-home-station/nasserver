@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use models::agent::{ChatRequest, TaskRequest, TaskResponse};
-use crate::state::AppState;
+use infra::AppState;
 use common::core::Result;
 use tokio_stream::StreamExt;
 
