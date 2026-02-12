@@ -22,5 +22,6 @@ pub struct AppState {
     pub torrent_session: Arc<librqbit::Session>,
     pub magnet_cache: Arc<Mutex<HashMap<String, bytes::Bytes>>>,
     pub last_stats: Arc<Mutex<Option<crate::models::system::SystemStats>>>,
+    pub agent_tasks: Arc<Mutex<HashMap<String, crate::models::agent::AgentTask>>>,
 }
 

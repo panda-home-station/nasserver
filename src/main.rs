@@ -284,6 +284,7 @@ async fn main() {
         torrent_session: session,
         magnet_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
         last_stats: Arc::new(Mutex::new(None)),
+        agent_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     // Start filesystem watcher to sync DB with disk changes
