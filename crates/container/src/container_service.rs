@@ -1,12 +1,13 @@
-use async_trait::async_trait;
-use bollard::container::{ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions, StopContainerOptions};
-use bollard::image::{ListImagesOptions, RemoveImageOptions};
+use bollard::Docker;
+use bollard::container::{ListContainersOptions, StartContainerOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions};
 use bollard::volume::ListVolumesOptions;
 use bollard::network::ListNetworksOptions;
-use bollard::Docker;
-use crate::ContainerService;
-use models::container::{ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig};
-use common::core::{Result, AppError};
+use bollard::image::{ListImagesOptions, RemoveImageOptions};
+use async_trait::async_trait;
+use domain::{Result, Error, container::{
+    ContainerService, ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig
+}};
+// Remove models import
 
 pub struct ContainerServiceImpl {
     docker: Docker,
@@ -82,7 +83,7 @@ impl ContainerService for ContainerServiceImpl {
                 ..Default::default()
             }))
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
 
         Ok(containers
             .into_iter()
@@ -107,25 +108,25 @@ impl ContainerService for ContainerServiceImpl {
     async fn start_container(&self, id: &str) -> Result<()> {
         self.docker.start_container(id, None::<StartContainerOptions<String>>)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))
+            .map_err(|e| Error::Internal(e.to_string()))
     }
 
     async fn stop_container(&self, id: &str) -> Result<()> {
         self.docker.stop_container(id, None::<StopContainerOptions>)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))
+            .map_err(|e| Error::Internal(e.to_string()))
     }
 
     async fn restart_container(&self, id: &str) -> Result<()> {
         self.docker.restart_container(id, None::<RestartContainerOptions>)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))
+            .map_err(|e| Error::Internal(e.to_string()))
     }
 
     async fn remove_container(&self, id: &str) -> Result<()> {
         self.docker.remove_container(id, None::<RemoveContainerOptions>)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))
+            .map_err(|e| Error::Internal(e.to_string()))
     }
 
     async fn list_images(&self) -> Result<Vec<ImageInfo>> {
@@ -135,7 +136,7 @@ impl ContainerService for ContainerServiceImpl {
                 ..Default::default()
             }))
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
 
         let mut items = Vec::new();
         for img in images {
@@ -177,14 +178,14 @@ impl ContainerService for ContainerServiceImpl {
     async fn remove_image(&self, id: &str) -> Result<()> {
         self.docker.remove_image(id, None::<RemoveImageOptions>, None)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
         Ok(())
     }
 
     async fn list_volumes(&self) -> Result<Vec<VolumeInfo>> {
         let volumes = self.docker.list_volumes(None::<ListVolumesOptions<String>>)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
         
         Ok(volumes.volumes.unwrap_or_default().into_iter().map(|v| VolumeInfo {
             name: v.name,
@@ -197,7 +198,7 @@ impl ContainerService for ContainerServiceImpl {
     async fn list_networks(&self) -> Result<Vec<NetworkInfo>> {
         let networks = self.docker.list_networks(None::<ListNetworksOptions<String>>)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
 
         Ok(networks.into_iter().map(|n| {
             let config = if let Some(ipam) = &n.ipam {

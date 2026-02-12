@@ -5,9 +5,11 @@ use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
 use librqbit::{Session, AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent};
-use common::core::{Result, AppError};
-use crate::{DownloaderService, DownloadTaskResp, SubTaskResp};
-use models::downloader::{DownloadTask, CreateDownloadReq, ResolveMagnetReq, ResolveMagnetResp, StartMagnetDownloadReq, TorrentFileMetadata};
+use domain::{Result, Error, downloader::{
+    DownloaderService, DownloadTask, CreateDownloadReq, ResolveMagnetReq, ResolveMagnetResp, 
+    StartMagnetDownloadReq, TorrentFileMetadata, DownloadTaskResp, SubTaskResp, ControlDownloadReq,
+    DownloadStats
+}};
 use chrono::Utc;
 use uuid::Uuid;
 use tokio::task::AbortHandle;
@@ -132,7 +134,7 @@ fn enrich_magnet_link(url: &str) -> String {
 
 #[async_trait]
 impl DownloaderService for DownloaderServiceImpl {
-    async fn list_downloads(&self) -> Result<Vec<DownloadTaskResp>> {
+    async fn list_tasks(&self) -> Result<Vec<DownloadTaskResp>> {
         let tasks = sqlx::query_as::<_, DownloadTask>("select * from downloads order by created_at desc")
             .fetch_all(&self.db)
             .await?;
@@ -204,13 +206,13 @@ impl DownloaderService for DownloaderServiceImpl {
         Ok(resp_tasks)
     }
 
-    async fn create_download(&self, username: &str, req: CreateDownloadReq) -> Result<()> {
+    async fn create_task(&self, username: &str, req: CreateDownloadReq) -> Result<()> {
         let id = Uuid::new_v4().to_string();
         let mut url = req.url.trim().trim_end_matches([',', ';', ' ']).to_string();
         url = enrich_magnet_link(&url);
         
         let user_id = self.get_user_id_by_username(username).await
-            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+            .ok_or_else(|| Error::NotFound("User not found".to_string()))?;
 
         let save_dir = format!("{}/vol1/User/{}/下载", self.storage_path, username);
         let _ = tokio::fs::create_dir_all(&save_dir).await;
@@ -256,7 +258,6 @@ impl DownloaderService for DownloaderServiceImpl {
             .execute(&self.db)
             .await?;
 
-            // Spawn download task (logic moved to helper)
             self.spawn_magnet_download(id, url, save_dir, user_id, username.to_string()).await;
             return Ok(());
         }
@@ -302,95 +303,89 @@ impl DownloaderService for DownloaderServiceImpl {
         Ok(())
     }
 
-    async fn pause_download(&self, id: &str) -> Result<()> {
-        let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Task not found".to_string()))?;
+    async fn control_task(&self, id: &str, req: ControlDownloadReq) -> Result<()> {
+        match req.action.as_str() {
+            "pause" => {
+                let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
+                    .bind(id)
+                    .fetch_optional(&self.db)
+                    .await?
+                    .ok_or_else(|| Error::NotFound("Task not found".to_string()))?;
 
-        if task.url.starts_with("magnet:?xt=urn:btih:") {
-            if let Some(hash_str) = task.url.strip_prefix("magnet:?xt=urn:btih:") {
-                let hash_clean = hash_str.split('&').next().unwrap_or(hash_str);
-                if let Ok(info_hash) = librqbit::dht::Id20::from_str(hash_clean) {
-                    let api = librqbit::Api::new(self.torrent_session.clone(), None);
-                    let _ = api.api_torrent_action_pause(librqbit::api::TorrentIdOrHash::Hash(info_hash));
+                if task.url.starts_with("magnet:?xt=urn:btih:") {
+                    if let Some(hash_str) = task.url.strip_prefix("magnet:?xt=urn:btih:") {
+                        let hash_clean = hash_str.split('&').next().unwrap_or(hash_str);
+                        if let Ok(info_hash) = librqbit::dht::Id20::from_str(hash_clean) {
+                            let api = librqbit::Api::new(self.torrent_session.clone(), None);
+                            let _ = api.api_torrent_action_pause(librqbit::api::TorrentIdOrHash::Hash(info_hash));
+                        }
+                    }
                 }
-            }
-        }
 
-        sqlx::query("update downloads set status = 'paused' where id = $1")
-            .bind(id)
-            .execute(&self.db)
-            .await?;
+                sqlx::query("update downloads set status = 'paused' where id = $1")
+                    .bind(id)
+                    .execute(&self.db)
+                    .await?;
 
-        let mut tasks = self.download_tasks.lock().await;
-        if let Some(handle) = tasks.remove(id) {
-            handle.abort();
-        }
-
-        Ok(())
-    }
-
-    async fn resume_download(&self, id: &str) -> Result<()> {
-        let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Task not found".to_string()))?;
-
-        if task.url.starts_with("magnet:?xt=urn:btih:") {
-            if let Some(hash_str) = task.url.strip_prefix("magnet:?xt=urn:btih:") {
-                let hash_clean = hash_str.split('&').next().unwrap_or(hash_str);
-                if let Ok(info_hash) = librqbit::dht::Id20::from_str(hash_clean) {
-                    let api = librqbit::Api::new(self.torrent_session.clone(), None);
-                    let _ = api.api_torrent_action_start(librqbit::api::TorrentIdOrHash::Hash(info_hash));
-                    
-                    // Re-spawn monitor if it's a torrent
-                    let api = librqbit::Api::new(self.torrent_session.clone(), None);
-                    let _ = api.api_torrent_details(librqbit::api::TorrentIdOrHash::Hash(info_hash));
+                let mut tasks = self.download_tasks.lock().await;
+                if let Some(handle) = tasks.remove(id) {
+                    handle.abort();
                 }
-            }
-        } else {
-            // HTTP download resume
-            self.spawn_http_download(task.id, task.url, task.path, "1".to_string()).await; // FIXME: user_id
-        }
+            },
+            "resume" => {
+                let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
+                    .bind(id)
+                    .fetch_optional(&self.db)
+                    .await?
+                    .ok_or_else(|| Error::NotFound("Task not found".to_string()))?;
 
-        sqlx::query("update downloads set status = 'downloading' where id = $1")
-            .bind(id)
-            .execute(&self.db)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn delete_download(&self, id: &str) -> Result<()> {
-        let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Task not found".to_string()))?;
-
-        if task.url.starts_with("magnet:?xt=urn:btih:") {
-            if let Some(hash_str) = task.url.strip_prefix("magnet:?xt=urn:btih:") {
-                let hash_clean = hash_str.split('&').next().unwrap_or(hash_str);
-                if let Ok(info_hash) = librqbit::dht::Id20::from_str(hash_clean) {
-                    let api = librqbit::Api::new(self.torrent_session.clone(), None);
-                    let _ = api.api_torrent_action_delete(librqbit::api::TorrentIdOrHash::Hash(info_hash)).await;
+                if task.url.starts_with("magnet:?xt=urn:btih:") {
+                    if let Some(hash_str) = task.url.strip_prefix("magnet:?xt=urn:btih:") {
+                        let hash_clean = hash_str.split('&').next().unwrap_or(hash_str);
+                        if let Ok(info_hash) = librqbit::dht::Id20::from_str(hash_clean) {
+                            let api = librqbit::Api::new(self.torrent_session.clone(), None);
+                            let _ = api.api_torrent_action_start(librqbit::api::TorrentIdOrHash::Hash(info_hash));
+                        }
+                    }
+                } else {
+                    self.spawn_http_download(task.id, task.url, task.path, "1".to_string()).await; // FIXME: user_id
                 }
-            }
-        }
 
-        sqlx::query("delete from downloads where id = $1")
-            .bind(id)
-            .execute(&self.db)
-            .await?;
-        
-        {
-            let mut tasks = self.download_tasks.lock().await;
-            if let Some(handle) = tasks.remove(id) {
-                handle.abort();
-            }
+                sqlx::query("update downloads set status = 'downloading' where id = $1")
+                    .bind(id)
+                    .execute(&self.db)
+                    .await?;
+            },
+            "delete" => {
+                let task = sqlx::query_as::<_, DownloadTask>("select * from downloads where id = $1")
+                    .bind(id)
+                    .fetch_optional(&self.db)
+                    .await?
+                    .ok_or_else(|| Error::NotFound("Task not found".to_string()))?;
+
+                if task.url.starts_with("magnet:?xt=urn:btih:") {
+                    if let Some(hash_str) = task.url.strip_prefix("magnet:?xt=urn:btih:") {
+                        let hash_clean = hash_str.split('&').next().unwrap_or(hash_str);
+                        if let Ok(info_hash) = librqbit::dht::Id20::from_str(hash_clean) {
+                            let api = librqbit::Api::new(self.torrent_session.clone(), None);
+                            let _ = api.api_torrent_action_delete(librqbit::api::TorrentIdOrHash::Hash(info_hash)).await;
+                        }
+                    }
+                }
+
+                sqlx::query("delete from downloads where id = $1")
+                    .bind(id)
+                    .execute(&self.db)
+                    .await?;
+                
+                {
+                    let mut tasks = self.download_tasks.lock().await;
+                    if let Some(handle) = tasks.remove(id) {
+                        handle.abort();
+                    }
+                }
+            },
+            _ => return Err(Error::BadRequest("Invalid action".to_string())),
         }
         Ok(())
     }
@@ -403,7 +398,7 @@ impl DownloaderService for DownloaderServiceImpl {
         };
         
         let add_result = self.torrent_session.add_torrent(AddTorrent::from_url(magnet_url), Some(opts)).await
-            .map_err(|e| AppError::Internal(format!("Failed to resolve magnet: {}", e)))?;
+            .map_err(|e| Error::Internal(format!("Failed to resolve magnet: {}", e)))?;
         
         match add_result {
             AddTorrentResponse::ListOnly(resp) => {
@@ -433,7 +428,7 @@ impl DownloaderService for DownloaderServiceImpl {
                     name,
                 })
             },
-            _ => Err(AppError::Internal("Unexpected response from torrent engine (not ListOnly)".to_string())),
+            _ => Err(Error::Internal("Unexpected response from torrent engine (not ListOnly)".to_string())),
         }
     }
 
@@ -442,7 +437,7 @@ impl DownloaderService for DownloaderServiceImpl {
             let cache: tokio::sync::MutexGuard<HashMap<String, Bytes>> = self.magnet_cache.lock().await;
             match cache.get(&req.token) {
                 Some(b) => b.clone(),
-                None => return Err(AppError::NotFound("Magnet info expired or not found".to_string())),
+                None => return Err(Error::NotFound("Magnet info expired or not found".to_string())),
             }
         };
         
@@ -458,7 +453,7 @@ impl DownloaderService for DownloaderServiceImpl {
 
         let id = Uuid::new_v4().to_string();
         let user_id = self.get_user_id_by_username(username).await
-            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+            .ok_or_else(|| Error::NotFound("User not found".to_string()))?;
         
         let base_save_dir = if let Some(p) = req.path {
             let relative_path = p.trim_start_matches('/');
@@ -528,11 +523,32 @@ impl DownloaderService for DownloaderServiceImpl {
                     self.spawn_monitor_torrent(id, handle, user_id, username.to_string(), save_dir).await;
                     Ok(())
                 } else {
-                    Err(AppError::Internal("Failed to get torrent handle".to_string()))
+                    Err(Error::Internal("Failed to get torrent handle".to_string()))
                 }
             },
-            Err(e) => Err(AppError::Internal(format!("Failed to start download: {}", e))),
+            Err(e) => Err(Error::Internal(format!("Failed to start download: {}", e))),
         }
+    }
+
+    async fn get_stats(&self) -> Result<DownloadStats> {
+        let total_tasks: i64 = sqlx::query_scalar::<_, i64>("select count(*) from downloads")
+            .fetch_one(&self.db)
+            .await?;
+        
+        let active_tasks: i64 = sqlx::query_scalar::<_, i64>("select count(*) from downloads where status = 'downloading'")
+            .fetch_one(&self.db)
+            .await?;
+            
+        let download_speed: Option<i64> = sqlx::query_scalar::<_, Option<i64>>("select sum(speed) from downloads where status = 'downloading'")
+            .fetch_one(&self.db)
+            .await?;
+        let download_speed = download_speed.unwrap_or(0);
+
+        Ok(DownloadStats {
+            total_tasks: total_tasks as usize,
+            active_tasks: active_tasks as usize,
+            download_speed,
+        })
     }
 }
 

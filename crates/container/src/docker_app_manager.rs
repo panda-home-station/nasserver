@@ -1,8 +1,6 @@
-use async_trait::async_trait;
 use bollard::Docker;
-use models::domain::app::{App, AppStatus, AppType};
-use crate::AppManager;
-use common::core::{Result, AppError};
+use async_trait::async_trait;
+use domain::{Result, Error, container::AppManager, entities::app::{App, AppStatus, AppType}};
 
 pub struct DockerAppManager {
     docker: Docker,
@@ -70,7 +68,7 @@ impl DockerAppManager {
 impl AppManager for DockerAppManager {
     async fn list_apps(&self) -> Result<Vec<App>> {
         let containers = self.docker.list_containers::<String>(None).await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
         
         let apps = containers.into_iter().map(|c| {
             App {
@@ -94,7 +92,7 @@ impl AppManager for DockerAppManager {
 
     async fn get_app(&self, id: &str) -> Result<App> {
         let c = self.docker.inspect_container(id, None).await
-            .map_err(|_| AppError::NotFound(format!("App {} not found", id)))?;
+            .map_err(|_| Error::NotFound(format!("App {} not found", id)))?;
         
         Ok(App {
             id: c.id.unwrap_or_default(),
@@ -121,19 +119,19 @@ impl AppManager for DockerAppManager {
 
     async fn uninstall_app(&self, id: &str) -> Result<()> {
         self.docker.remove_container(id, None).await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
         Ok(())
     }
 
     async fn start_app(&self, id: &str) -> Result<()> {
         self.docker.start_container::<String>(id, None).await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
         Ok(())
     }
 
     async fn stop_app(&self, id: &str) -> Result<()> {
         self.docker.stop_container(id, None).await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| Error::Internal(e.to_string()))?;
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerInfo {
     pub id: String,
     pub names: Vec<String>,
@@ -11,7 +11,7 @@ pub struct ContainerInfo {
     pub ports: Vec<(u16, Option<u16>, Option<String>)>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageInfo {
     pub id: String,
     pub repo_tags: Vec<String>,
@@ -22,7 +22,7 @@ pub struct ImageInfo {
     pub volumes: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeInfo {
     pub name: String,
     pub driver: String,
@@ -30,7 +30,7 @@ pub struct VolumeInfo {
     pub created_at: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct NetworkInfo {
     pub id: String,
@@ -44,28 +44,21 @@ pub struct NetworkInfo {
     pub ipam: NetworkIpam,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct NetworkIpam {
     pub driver: String,
     pub config: Vec<NetworkIpamConfig>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct NetworkIpamConfig {
     pub subnet: Option<String>,
     pub gateway: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct IdReq {
     pub id: String,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-pub struct PullReq {
-    pub image: String,
-    pub tag: Option<String>,
 }

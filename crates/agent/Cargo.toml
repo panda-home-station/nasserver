@@ -12,5 +12,4 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
-common = { workspace = true }
-models = { workspace = true }
+domain = { workspace = true }

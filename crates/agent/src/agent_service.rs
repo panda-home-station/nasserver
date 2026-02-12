@@ -1,7 +1,5 @@
+use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep}};
 use async_trait::async_trait;
-use crate::AgentService;
-use common::core::{Result, AppError};
-use models::agent::{AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep};
 use axum::response::sse::Event;
 use futures_util::stream::{BoxStream, StreamExt};
 use reqwest::Client;
@@ -122,20 +120,20 @@ impl AgentService for AgentServiceImpl {
                 plan: task.plan.clone(),
                 logs: task.logs.clone(),
             }),
-            None => Err(AppError::NotFound("Task not found".to_string())),
+            None => Err(Error::NotFound("Task not found".to_string())),
         }
     }
 
     async fn chat(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<Event>>> {
         if req.messages.is_empty() {
-            return Err(AppError::BadRequest("Empty messages".to_string()));
+            return Err(Error::BadRequest("Empty messages".to_string()));
         }
 
         let endpoint = req.endpoint.clone().or_else(|| std::env::var("PNAS_AGENT_OLLAMA_ENDPOINT").ok())
-            .ok_or_else(|| AppError::BadRequest("Ollama endpoint is not configured".to_string()))?;
+            .ok_or_else(|| Error::BadRequest("Ollama endpoint is not configured".to_string()))?;
 
         let model = req.model.clone().or_else(|| std::env::var("PNAS_AGENT_OLLAMA_MODEL").ok())
-            .ok_or_else(|| AppError::BadRequest("Model is not specified".to_string()))?;
+            .ok_or_else(|| Error::BadRequest("Model is not specified".to_string()))?;
 
         let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
 
@@ -146,12 +144,12 @@ impl AgentService for AgentServiceImpl {
         });
 
         let resp = self.client.post(&url).json(&payload).send().await
-            .map_err(|e| AppError::Internal(format!("Ollama unreachable: {}", e)))?;
+            .map_err(|e| Error::Internal(format!("Ollama unreachable: {}", e)))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!("Ollama error: status={}, body={}", status, body_text)));
+            return Err(Error::Internal(format!("Ollama error: status={}, body={}", status, body_text)));
         }
 
         let stream = resp.bytes_stream().map(|result| {
@@ -168,7 +166,7 @@ impl AgentService for AgentServiceImpl {
                     }
                     events
                 },
-                Err(e) => vec![Err(AppError::Internal(e.to_string()))],
+                Err(e) => vec![Err(Error::Internal(e.to_string()))],
             }
         })
         .flat_map(|events| futures_util::stream::iter(events))

@@ -7,15 +7,15 @@ use axum::body::Body;
 use tokio_util::io::ReaderStream;
 use tokio::fs::{self as tokio_fs};
 use infra::AppState;
-use models::auth::AuthUser;
-use models::docs::{DocsListQuery, DocsListResp, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery};
-use common::core::Result;
+use domain::entities::auth::AuthUser;
+use domain::storage::{DocsListResp, DocsListQuery, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery};
+use crate::error::ApiResult;
 
 pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Query(q): Query<DocsListQuery>,
-) -> Result<Json<DocsListResp>> {
+) -> ApiResult<Json<DocsListResp>> {
     let resp = state.storage_service.list(&user.username, q).await?;
     Ok(Json(resp))
 }
@@ -24,7 +24,7 @@ pub async fn mkdir(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Json(req): Json<DocsMkdirReq>,
-) -> Result<Json<serde_json::Value>> {
+) -> ApiResult<Json<serde_json::Value>> {
     state.storage_service.mkdir(&user.username, req).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -33,7 +33,7 @@ pub async fn rename(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Json(req): Json<DocsRenameReq>,
-) -> Result<Json<serde_json::Value>> {
+) -> ApiResult<Json<serde_json::Value>> {
     state.storage_service.rename(&user.username, req).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -42,7 +42,7 @@ pub async fn delete(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Query(q): Query<DocsDeleteQuery>,
-) -> Result<Json<serde_json::Value>> {
+) -> ApiResult<Json<serde_json::Value>> {
     state.storage_service.delete(&user.username, q).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -51,7 +51,7 @@ pub async fn download(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Query(q): Query<DocsDownloadQuery>,
-) -> Result<impl IntoResponse> {
+) -> ApiResult<impl IntoResponse> {
     let path = q.path.as_deref().unwrap_or("/");
     let physical_path = state.storage_service.get_file_path(&user.username, path).await?;
     
@@ -74,7 +74,7 @@ pub async fn upload(
     Extension(user): Extension<AuthUser>,
     Query(q): Query<DocsListQuery>,
     mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let parent = q.path.as_deref().unwrap_or("/");
 
     while let Some(field) = multipart.next_field().await? {

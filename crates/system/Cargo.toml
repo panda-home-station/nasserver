@@ -4,20 +4,19 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+domain = { workspace = true, features = ["sqlx"] }
+gpu = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
-sqlx = { workspace = true }
-chrono = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
-ash = { workspace = true }
-password-hash = { workspace = true }
-argon2 = { workspace = true }
-rand_core = { workspace = true }
 sysinfo = { workspace = true }
 local-ip-address = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+argon2 = { workspace = true }
+password-hash = { workspace = true }
+rand_core = { workspace = true }
 fastrand = { workspace = true }
-common = { workspace = true }
-models = { workspace = true }
-gpu = { workspace = true }
 async-trait = { workspace = true }
+ash = { workspace = true }

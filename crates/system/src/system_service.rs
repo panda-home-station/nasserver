@@ -1,12 +1,14 @@
 use crate::SystemService;
-use models::system::{SystemStats, StatsHistoryQuery, DeviceInfoResp, HardwareInfo, NetworkInfo, DiskUsage, PhysicalDisk, InitReq, PortStatus};
-use common::core::{Result, AppError};
-use common::START_TIME;
+use domain::entities::system::{
+    SystemStats, StatsHistoryQuery, DeviceInfo, HardwareInfo, NetworkInfo, 
+    DiskUsage, PhysicalDisk, InitReq, PortStatus
+};
+use domain::{Result, Error as DomainError};
 use async_trait::async_trait;
 use sqlx::{Pool, Sqlite};
 use sysinfo::{System, Disks, Networks, Components};
 use std::sync::{Arc, Mutex};
-use chrono::Utc;
+use chrono::{Utc, DateTime};
 use password_hash::{SaltString, PasswordHasher};
 use argon2::Argon2;
 use uuid::Uuid;
@@ -16,6 +18,7 @@ use ash::{Entry, vk};
 
 pub struct SystemServiceImpl {
     db: Pool<Sqlite>,
+    pub start_time: DateTime<Utc>,
     sys: Arc<Mutex<System>>,
     disks: Arc<Mutex<Disks>>,
     networks: Arc<Mutex<Networks>>,
@@ -24,7 +27,7 @@ pub struct SystemServiceImpl {
 }
 
 impl SystemServiceImpl {
-    pub fn new(db: Pool<Sqlite>) -> Self {
+    pub fn new(db: Pool<Sqlite>, start_time: DateTime<Utc>) -> Self {
         let mut sys = System::new();
         sys.refresh_cpu();
         sys.refresh_memory();
@@ -35,6 +38,7 @@ impl SystemServiceImpl {
 
         Self {
             db,
+            start_time,
             sys: Arc::new(Mutex::new(sys)),
             disks: Arc::new(Mutex::new(disks)),
             networks: Arc::new(Mutex::new(networks)),
@@ -235,13 +239,13 @@ impl SystemService for SystemServiceImpl {
 
     async fn init_system(&self, req: InitReq) -> Result<()> {
         if self.is_initialized().await? {
-            return Err(AppError::Internal("already_initialized".to_string()));
+            return Err(DomainError::Internal("already_initialized".to_string()));
         }
 
         let salt = SaltString::generate(&mut rand_core::OsRng);
         let argon2 = Argon2::default();
         let hash = argon2.hash_password(req.password.as_bytes(), &salt)
-            .map_err(|e| AppError::Internal(e.to_string()))?
+            .map_err(|e| DomainError::Internal(e.to_string()))?
             .to_string();
         let uid = Uuid::new_v4();
         
@@ -274,7 +278,7 @@ impl SystemService for SystemServiceImpl {
         Ok(())
     }
 
-    async fn get_device_info(&self) -> Result<DeviceInfoResp> {
+    async fn get_device_info(&self) -> Result<DeviceInfo> {
         let name: String = sqlx::query_scalar("select value from system_config where key = 'device_name'")
             .fetch_optional(&self.db)
             .await?
@@ -285,7 +289,7 @@ impl SystemService for SystemServiceImpl {
             .unwrap_or_else(|| "Unknown".to_string());
         
         let now = Utc::now();
-        let uptime_duration = now.signed_duration_since(*START_TIME);
+        let uptime_duration = now.signed_duration_since(self.start_time);
         let days = uptime_duration.num_days();
         let hours = uptime_duration.num_hours() % 24;
         let minutes = uptime_duration.num_minutes() % 60;
@@ -295,10 +299,10 @@ impl SystemService for SystemServiceImpl {
         let time_ts = now.timestamp();
 
         let (hardware, network, system_disk) = {
-            let sys = self.sys.lock().map_err(|_| AppError::Internal("mutex lock failed".to_string()))?;
-            let components = self.components.lock().map_err(|_| AppError::Internal("mutex lock failed".to_string()))?;
-            let disks = self.disks.lock().map_err(|_| AppError::Internal("mutex lock failed".to_string()))?;
-            let networks = self.networks.lock().map_err(|_| AppError::Internal("mutex lock failed".to_string()))?;
+            let sys = self.sys.lock().map_err(|_| DomainError::Internal("mutex lock failed".to_string()))?;
+            let components = self.components.lock().map_err(|_| DomainError::Internal("mutex lock failed".to_string()))?;
+            let disks = self.disks.lock().map_err(|_| DomainError::Internal("mutex lock failed".to_string()))?;
+            let networks = self.networks.lock().map_err(|_| DomainError::Internal("mutex lock failed".to_string()))?;
 
             let cpu_model = sys.global_cpu_info().brand().to_string();
             let cpu_cores = sys.cpus().len() as u32;
@@ -352,7 +356,7 @@ impl SystemService for SystemServiceImpl {
 
         let physical_disks = get_physical_disks();
 
-        Ok(DeviceInfoResp {
+        Ok(DeviceInfo {
             device_name: name,
             device_id: id,
             system_version: "0.0.1".to_string(),
@@ -415,6 +419,48 @@ impl SystemService for SystemServiceImpl {
 
     async fn get_gpus(&self) -> Vec<gpu::GpuInfo> {
         gpu::get_system_gpus()
+    }
+
+    async fn get_docker_mirrors(&self) -> Result<Vec<serde_json::Value>> {
+        let list_json: Option<String> = sqlx::query_scalar("select value from system_config where key = 'docker_mirrors'")
+            .fetch_optional(&self.db)
+            .await?;
+        
+        let mirrors: Vec<serde_json::Value> = list_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        
+        Ok(mirrors)
+    }
+
+    async fn set_docker_mirrors(&self, mirrors: Vec<serde_json::Value>) -> Result<()> {
+        let json = serde_json::to_string(&mirrors)
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+        sqlx::query("insert or replace into system_config (key, value) values ('docker_mirrors', $1)")
+            .bind(json)
+            .execute(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_docker_settings(&self) -> Result<serde_json::Value> {
+        let v: Option<String> = sqlx::query_scalar("select value from system_config where key = 'docker_mirror'")
+            .fetch_optional(&self.db)
+            .await?;
+        let settings: serde_json::Value = v
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({ "mode": "none", "host": null }));
+        Ok(settings)
+    }
+
+    async fn set_docker_settings(&self, settings: serde_json::Value) -> Result<()> {
+        let json = serde_json::to_string(&settings)
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+        sqlx::query("insert or replace into system_config (key, value) values ('docker_mirror', $1)")
+            .bind(json)
+            .execute(&self.db)
+            .await?;
+        Ok(())
     }
 
     async fn run_background_stats_collector(&self) {

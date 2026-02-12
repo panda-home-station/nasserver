@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use crate::StorageService;
-use common::core::{Result, AppError};
-use models::docs::{DocsListQuery, DocsListResp, DocsEntry, DocsMkdirReq, DocsRenameReq, DocsDeleteQuery};
+use domain::{Result, Error as DomainError, storage::{
+    DocsListQuery, DocsListResp, DocsEntry, DocsMkdirReq, DocsRenameReq, DocsDeleteQuery
+}};
 use sqlx::{Pool, Sqlite, Row};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -42,7 +43,7 @@ impl StorageServiceImpl {
             }
             let app_name = parts[1];
             if !self.check_app_access(username, app_name).await? {
-                return Err(AppError::Forbidden("Access denied".to_string()));
+                return Err(DomainError::Forbidden("Access denied".to_string()));
             }
             let mut p = Path::new(&self.storage_path).join("vol1").join("AppData").join(app_name);
             if parts.len() > 2 {
@@ -146,7 +147,7 @@ impl StorageService for StorageServiceImpl {
         let full_path = self.normalize_path(&req.path);
         let path_obj = Path::new(&full_path);
         let parent = path_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
-        let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| AppError::BadRequest("Invalid path".to_string()))?;
+        let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
         let physical_path = self.resolve_physical_path(username, &full_path).await?;
 
@@ -174,8 +175,8 @@ impl StorageService for StorageServiceImpl {
     }
 
     async fn rename(&self, username: &str, req: DocsRenameReq) -> Result<()> {
-        let from = req.from.as_deref().ok_or_else(|| AppError::BadRequest("Missing 'from' path".to_string()))?;
-        let to = req.to.as_deref().ok_or_else(|| AppError::BadRequest("Missing 'to' path".to_string()))?;
+        let from = req.from.as_deref().ok_or_else(|| DomainError::BadRequest("Missing 'from' path".to_string()))?;
+        let to = req.to.as_deref().ok_or_else(|| DomainError::BadRequest("Missing 'to' path".to_string()))?;
 
         let from_path = self.normalize_path(from);
         let to_path = self.normalize_path(to);
@@ -184,10 +185,10 @@ impl StorageService for StorageServiceImpl {
         let to_obj = Path::new(&to_path);
 
         let from_parent = from_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
-        let from_name = from_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| AppError::BadRequest("Invalid from path".to_string()))?;
+        let from_name = from_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid from path".to_string()))?;
 
         let to_parent = to_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
-        let to_name = to_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| AppError::BadRequest("Invalid to path".to_string()))?;
+        let to_name = to_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid to path".to_string()))?;
 
         let old_physical = self.resolve_physical_path(username, &from_path).await?;
         let new_physical = self.resolve_physical_path(username, &to_path).await?;
@@ -217,10 +218,10 @@ impl StorageService for StorageServiceImpl {
     }
 
     async fn delete(&self, username: &str, query: DocsDeleteQuery) -> Result<()> {
-        let full_path = self.normalize_path(query.path.as_deref().ok_or_else(|| AppError::BadRequest("Missing path".to_string()))?);
+        let full_path = self.normalize_path(query.path.as_deref().ok_or_else(|| DomainError::BadRequest("Missing path".to_string()))?);
         let path_obj = Path::new(&full_path);
         let parent = path_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
-        let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| AppError::BadRequest("Invalid path".to_string()))?;
+        let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
         let physical_path = self.resolve_physical_path(username, &full_path).await?;
 

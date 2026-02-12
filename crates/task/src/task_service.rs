@@ -1,8 +1,6 @@
+use domain::{Result, task::{TaskService, FileTask, CreateTaskReq, UpdateTaskReq}};
 use async_trait::async_trait;
 use sqlx::{Pool, Sqlite};
-use crate::TaskService;
-use models::task::{FileTask, CreateTaskReq, UpdateTaskReq};
-use common::core::Result;
 
 pub struct TaskServiceImpl {
     db: Pool<Sqlite>,

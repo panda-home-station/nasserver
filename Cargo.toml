@@ -1,7 +1,5 @@
 [workspace]
 members = [
-    "crates/common",
-    "crates/models",
     "crates/auth",
     "crates/system",
     "crates/storage",
@@ -13,6 +11,7 @@ members = [
     "crates/server",
     "crates/infra",
     "crates/api",
+    "crates/domain",
 ]
 resolver = "2"
 
@@ -59,8 +58,6 @@ mime_guess = "2.0.5"
 thiserror = "2.0.18"
 async-trait = "0.1.89"
 
-common = { path = "crates/common" }
-models = { path = "crates/models" }
 auth = { path = "crates/auth" }
 system = { path = "crates/system" }
 storage = { path = "crates/storage" }
@@ -71,3 +68,4 @@ agent = { path = "crates/agent" }
 gpu = { path = "crates/gpu" }
 infra = { path = "crates/infra" }
 api = { path = "crates/api" }
+domain = { path = "crates/domain" }

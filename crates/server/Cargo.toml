@@ -10,6 +10,16 @@ path = "src/main.rs"
 [dependencies]
 infra = { workspace = true }
 api = { workspace = true }
-common = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
+dotenvy = { workspace = true }
+librqbit = { workspace = true }
+
+# Service Implementations (for Composition Root)
+auth = { workspace = true }
+system = { workspace = true }
+storage = { workspace = true }
+container = { workspace = true }
+downloader = { workspace = true }
+task = { workspace = true }
+agent = { workspace = true }

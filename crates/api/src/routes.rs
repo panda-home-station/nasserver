@@ -50,7 +50,7 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/podman/image/remove", post(docker::remove_image))
         // Registry
         .route("/api/podman/registry/search", get(crate::handlers::docker_registry::search))
-        .route("/api/podman/registry/hot", get(crate::handlers::docker_registry::hot))
+        // .route("/api/podman/registry/hot", get(crate::handlers::docker_registry::hot))
         // Registry settings
         .route("/api/podman/mirrors", get(crate::handlers::docker_registry::get_mirrors))
         .route("/api/podman/mirrors", post(crate::handlers::docker_registry::set_mirrors))

@@ -1,9 +1,11 @@
+mod init;
+
 use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() {
     // 1. Initialize infrastructure (Config, DB, Services, AppState)
-    let state = infra::init().await;
+    let state = init::init().await;
 
     // 2. Start background tasks
     infra::watcher::init(state.clone()).await;

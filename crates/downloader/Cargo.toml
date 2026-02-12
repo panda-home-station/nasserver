@@ -16,6 +16,5 @@ reqwest = { workspace = true }
 urlencoding = { workspace = true }
 sha2 = { workspace = true }
 base64ct = { workspace = true }
-common = { workspace = true }
-models = { workspace = true }
+domain = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }

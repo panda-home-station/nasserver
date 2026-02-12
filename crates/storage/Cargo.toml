@@ -4,12 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+domain = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
-sqlx = { workspace = true }
-bytes = { workspace = true }
-mime_guess = { workspace = true }
-common = { workspace = true }
-models = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 uuid = { workspace = true }
+mime_guess = { workspace = true }
