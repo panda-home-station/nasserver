@@ -8,7 +8,7 @@ use bollard::container::{
     Config, CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions,
     StopContainerOptions,
 };
-use bollard::models::HostConfig;
+use bollard::models::{HostConfig, RestartPolicy, RestartPolicyNameEnum};
 use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use bollard::volume::ListVolumesOptions;
 use bollard::network::ListNetworksOptions;
@@ -524,6 +524,13 @@ pub async fn create_container(State(st): State<AppState>, Extension(user): Exten
     let mut host_config = HostConfig {
         ..Default::default()
     };
+
+    if let Some(true) = req.auto_start {
+        host_config.restart_policy = Some(RestartPolicy {
+            name: Some(RestartPolicyNameEnum::ALWAYS),
+            ..Default::default()
+        });
+    }
 
     if let Some(privileged) = req.privileged {
         host_config.privileged = Some(privileged);
