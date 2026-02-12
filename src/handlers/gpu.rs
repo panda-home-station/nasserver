@@ -11,6 +11,7 @@ pub struct GpuInfo {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct GpuDockerConfig {
     pub device_requests: Vec<DeviceRequest>,
     pub devices: Vec<DeviceMapping>,
@@ -26,6 +27,7 @@ pub fn get_system_gpus() -> Vec<GpuInfo> {
     }
 }
 
+#[allow(dead_code)]
 pub fn resolve_gpu_config(gpu_id: &str) -> GpuDockerConfig {
     let mut config = GpuDockerConfig::default();
 
@@ -74,6 +76,7 @@ pub fn resolve_gpu_config(gpu_id: &str) -> GpuDockerConfig {
     config
 }
 
+#[allow(dead_code)]
 fn add_drm_devices(config: &mut GpuDockerConfig, pci_match: Option<&str>) {
     // If pci_match is None, add all render nodes (legacy behavior)
     // If pci_match is Some, find the specific render node
@@ -108,6 +111,7 @@ fn add_drm_devices(config: &mut GpuDockerConfig, pci_match: Option<&str>) {
     }
 }
 
+#[allow(dead_code)]
 fn find_render_node_by_pci(target_pci: &str) -> Option<String> {
     let dri_dir = std::fs::read_dir("/dev/dri").ok()?;
     for entry in dri_dir {

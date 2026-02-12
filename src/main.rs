@@ -8,12 +8,15 @@ mod handlers;
 mod middleware;
 mod routes;
 mod watcher;
+mod core;
+mod services;
+mod infra;
+mod api;
 
 use state::{AppState, DEVICE_CODES};
 
-use std::sync::{Arc, Mutex};
-use sysinfo::{System, Disks, Networks, Components};
-use sqlx::Row;
+use std::sync::Arc;
+use crate::infra::DownloaderServiceImpl;
 
 
 #[tokio::main]
@@ -250,201 +253,59 @@ async fn main() {
         .await;
     println!("Seeded default app permissions");
 
-    // Initialize system info components
-    // We use System::new() to avoid loading all processes which is slow
-    let mut sys = System::new();
-    sys.refresh_cpu();
-    sys.refresh_memory();
-    
-    let disks = Disks::new_with_refreshed_list();
-    let networks = Networks::new_with_refreshed_list();
-    let components = Components::new_with_refreshed_list();
-
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
     
+    let app_manager = Arc::new(crate::infra::DockerAppManager::new());
+    let auth_service = Arc::new(crate::infra::AuthServiceImpl::new(db.clone(), jwt_secret.clone(), storage_path.clone()));
+    let system_service = Arc::new(crate::infra::SystemServiceImpl::new(db.clone()));
+    let storage_service = Arc::new(crate::infra::StorageServiceImpl::new(db.clone(), storage_path.clone()));
+    let container_service = Arc::new(crate::infra::ContainerServiceImpl::new());
+    let agent_service = Arc::new(crate::infra::AgentServiceImpl::new());
+    let task_service = Arc::new(crate::infra::TaskServiceImpl::new(db.clone()));
+
     let torrent_dir = format!("{}/torrents", storage_path);
     let _ = std::fs::create_dir_all(&torrent_dir);
-    
-    // Enable listener and UPnP for better connectivity
     let mut session_opts = librqbit::SessionOptions::default();
     session_opts.enable_upnp_port_forwarding = true;
-    
     let session = librqbit::Session::new_with_opts(torrent_dir.into(), session_opts).await.expect("Failed to init torrent session");
+
+    let downloader_service = Arc::new(DownloaderServiceImpl::new(
+        db.clone(),
+        storage_path.clone(),
+        session.clone(),
+    ));
 
     let state = AppState {
         device_codes: &DEVICE_CODES,
         db,
         jwt_secret,
         storage_path,
-        sys: Arc::new(Mutex::new(sys)),
-        disks: Arc::new(Mutex::new(disks)),
-        networks: Arc::new(Mutex::new(networks)),
-        components: Arc::new(Mutex::new(components)),
-        download_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        torrent_session: session,
-        magnet_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        last_stats: Arc::new(Mutex::new(None)),
-        agent_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        app_manager,
+        auth_service,
+        system_service,
+        storage_service,
+        container_service,
+        downloader_service,
+        agent_service,
+        task_service,
     };
 
-    // Start filesystem watcher to sync DB with disk changes
+    // Helper functions to get internal Arcs from system_service if needed, 
+    // or just re-use the ones we passed in.
+    // For now, let's simplify and just use the ones we already have.
+
+    // Start background tasks
     watcher::init(state.clone()).await;
 
-    let api = routes::api_app(state.clone());
-
-    // Spawn background task to refresh system info
-    let state_clone = state.clone();
+    let sys_service = state.system_service.clone();
     tokio::spawn(async move {
-        let mut last_record = tokio::time::Instant::now();
-        let mut last_disk_read = 0u64;
-        let mut last_disk_write = 0u64;
-        let mut first_disk_run = true;
-
-        loop {
-            // Refresh interval
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            
-            let mut cpu_usage = 0.0;
-            let mut mem_usage = 0.0;
-            let mut mem_used = 0u64;
-            let mut mem_total = 0u64;
-            let mut net_recv = 0.0;
-            let mut net_sent = 0.0;
-            let mut disk_read_kbps = 0.0;
-            let mut disk_write_kbps = 0.0;
-
-            // 1. CPU & Memory - fast, must be done in-place for CPU usage calc
-            {
-                if let Ok(mut sys) = state_clone.sys.lock() {
-                    sys.refresh_cpu();
-                    sys.refresh_memory();
-                    cpu_usage = sys.global_cpu_info().cpu_usage() as f64;
-                    mem_total = sys.total_memory();
-                    mem_used = sys.used_memory();
-                    if mem_total > 0 {
-                        mem_usage = (mem_used as f64 / mem_total as f64) * 100.0;
-                    }
-                }
-            }
-
-            // 2. Disks - slow (I/O), do it outside lock
-            let new_disks = Disks::new_with_refreshed_list();
-            let disk_usage = if let Some(d) = new_disks.iter().find(|d| d.mount_point() == std::path::Path::new("/")) {
-                let total = d.total_space();
-                if total > 0 {
-                    ((total - d.available_space()) as f64 / total as f64) * 100.0
-                } else { 0.0 }
-            } else { 0.0 };
-
-            // Calculate disk R/W speed
-            
-            // Re-evaluating disk speed collection. If sysinfo doesn't support it easily, 
-            // I'll check if I can use a simpler approach or just use 0 for now to keep the UI working.
-            // Wait, sysinfo's DiskUsage is per process. 
-            // For system-wide, we can read /proc/diskstats on Linux.
-            
-            if cfg!(target_os = "linux") {
-                if let Ok(content) = tokio::fs::read_to_string("/proc/diskstats").await {
-                    let mut total_read_sectors = 0u64;
-                    let mut total_write_sectors = 0u64;
-                    for line in content.lines() {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if parts.len() >= 14 {
-                            // Column 6: sectors read, Column 10: sectors written
-                            total_read_sectors += parts[5].parse::<u64>().unwrap_or(0);
-                            total_write_sectors += parts[9].parse::<u64>().unwrap_or(0);
-                        }
-                    }
-                    let current_read_bytes = total_read_sectors * 512;
-                    let current_write_bytes = total_write_sectors * 512;
-                    
-                    if !first_disk_run {
-                        disk_read_kbps = (current_read_bytes.saturating_sub(last_disk_read)) as f64 / 1024.0 / 2.0;
-                        disk_write_kbps = (current_write_bytes.saturating_sub(last_disk_write)) as f64 / 1024.0 / 2.0;
-                    }
-                    last_disk_read = current_read_bytes;
-                    last_disk_write = current_write_bytes;
-                    first_disk_run = false;
-                }
-            }
-
-            {
-                if let Ok(mut disks) = state_clone.disks.lock() {
-                    *disks = new_disks;
-                }
-            }
-
-            // 3. Networks - can be slow, do it outside lock
-            let new_networks = Networks::new_with_refreshed_list();
-            for (_name, data) in &new_networks {
-                net_recv += data.received() as f64 / 1024.0; // KB
-                net_sent += data.transmitted() as f64 / 1024.0; // KB
-            }
-            {
-                if let Ok(mut networks) = state_clone.networks.lock() {
-                    *networks = new_networks;
-                }
-            }
-
-            let gpu_stats = handlers::gpu::get_gpu_usage();
-
-            let stats = crate::models::system::SystemStats {
-                cpu_usage,
-                memory_usage: mem_usage,
-                memory_used: Some(mem_used as i64),
-                memory_total: Some(mem_total as i64),
-                gpu_usage: gpu_stats.usage,
-                gpu_memory_usage: gpu_stats.mem_usage,
-                gpu_memory_used: gpu_stats.mem_used,
-                gpu_memory_total: gpu_stats.mem_total,
-                net_recv_kbps: net_recv,
-                net_sent_kbps: net_sent,
-                disk_usage,
-                disk_read_kbps: Some(disk_read_kbps),
-                disk_write_kbps: Some(disk_write_kbps),
-                created_at: Some(chrono::Utc::now()),
-            };
-
-            if let Ok(mut last) = state_clone.last_stats.lock() {
-                *last = Some(stats.clone());
-            }
-
-            // Record every 10 seconds
-            if last_record.elapsed().as_secs() >= 10 {
-                let _ = sqlx::query("insert into system_stats (cpu_usage, memory_usage, gpu_usage, gpu_memory_usage, net_recv_kbps, net_sent_kbps, disk_usage, disk_read_kbps, disk_write_kbps) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)")
-                    .bind(stats.cpu_usage)
-                    .bind(stats.memory_usage)
-                    .bind(stats.gpu_usage)
-                    .bind(stats.gpu_memory_usage)
-                    .bind(stats.net_recv_kbps)
-                    .bind(stats.net_sent_kbps)
-                    .bind(stats.disk_usage)
-                    .bind(stats.disk_read_kbps)
-                    .bind(stats.disk_write_kbps)
-                    .execute(&state_clone.db)
-                    .await;
-                last_record = tokio::time::Instant::now();
-            }
-        }
+        sys_service.run_background_stats_collector().await;
     });
 
-    // Spawn background task to purge trash older than 30 days
-    {
-        let db = state.db.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(24 * 3600)).await;
-                let rows = sqlx::query("select id from cloud_files where dir like '/Trash%' and updated_at < datetime('now', '-30 day')")
-                    .fetch_all(&db)
-                    .await
-                    .unwrap_or_default();
-                for row in rows {
-                    let id: String = row.try_get("id").unwrap_or_default();
-                    let _ = sqlx::query("delete from cloud_files where id = $1").bind(&id).execute(&db).await;
-                }
-            }
-        });
-    }
+    let storage_service = state.storage_service.clone();
+    tokio::spawn(async move {
+        storage_service.run_trash_purger().await;
+    });
 
     let port: u16 = std::env::var("PNAS_PORT")
         .ok()
@@ -465,6 +326,7 @@ async fn main() {
     tokio::spawn(async move {
         let _ = s.await;
     });
+    let api = routes::api_app(state.clone());
     axum::serve(listener, api).await.unwrap();
 }
 

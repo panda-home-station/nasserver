@@ -3,19 +3,14 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use notify::event::{ModifyKind, RenameMode, AccessKind};
-use uuid::Uuid;
 
 pub async fn init(state: AppState) {
-    // Determine the path to watch: {storage_path}/vol1/User
-    // We only watch User directory for DB syncing. AppData is accessed directly.
     let watch_path = format!("{}/vol1/User", state.storage_path);
     let watch_path_buf = PathBuf::from(&watch_path);
 
-    // Initial Scan: Sync existing files to DB
     let state_clone = state.clone();
     let watch_path_clone = watch_path.clone();
     tokio::spawn(async move {
-        // Step 0: Cleanup orphan .part files
         println!("Starting cleanup of orphan .part files on {}", watch_path_clone);
         if let Err(e) = cleanup_temp_files(&watch_path_clone).await {
             eprintln!("Cleanup failed: {}", e);
@@ -29,10 +24,8 @@ pub async fn init(state: AppState) {
         }
     });
 
-    // Create a channel to receive events
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    // Create the watcher
     let mut watcher: RecommendedWatcher = Watcher::new(
         move |res: notify::Result<Event>| {
             if let Ok(event) = res {
@@ -43,7 +36,6 @@ pub async fn init(state: AppState) {
     )
     .expect("Failed to create file watcher");
 
-    // Start watching
     if let Err(e) = watcher.watch(&watch_path_buf, RecursiveMode::Recursive) {
         eprintln!("Failed to watch directory {}: {}", watch_path, e);
         return;
@@ -51,7 +43,6 @@ pub async fn init(state: AppState) {
 
     println!("File system watcher started on {}", watch_path);
 
-    // Spawn the event processing loop
     tokio::spawn(async move {
         let _watcher_guard = watcher; 
 
@@ -81,7 +72,6 @@ async fn cleanup_temp_files(root_path: &str) -> std::io::Result<()> {
                 continue;
             }
 
-            // Check if it's a .part file
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with('.') && name.ends_with(".part") {
                     println!("Cleaning up orphan file: {:?}", path);
@@ -106,7 +96,6 @@ async fn initial_scan(state: &AppState, root_path: &str) -> std::io::Result<()> 
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             
-            // Ignore dotfiles
             if path.file_name().map_or(false, |n| n.to_string_lossy().starts_with('.')) {
                 continue;
             }
@@ -115,23 +104,19 @@ async fn initial_scan(state: &AppState, root_path: &str) -> std::io::Result<()> 
                 queue.push_back(path.clone());
             }
 
-            // Sync to DB
-            handle_upsert(state, &path).await;
+            let _ = state.storage_service.sync_external_change(&path).await;
         }
     }
     Ok(())
 }
 
 async fn process_event(state: &AppState, event: Event) {
-    // Filter out noisy events
     if let EventKind::Access(AccessKind::Open(_)) = event.kind {
         return;
     }
     if let EventKind::Access(AccessKind::Read) = event.kind {
         return;
     }
-
-    println!("Watcher received event: {:?}", event); 
 
     match event.kind {
         EventKind::Modify(ModifyKind::Name(mode)) => {
@@ -143,12 +128,12 @@ async fn process_event(state: &AppState, event: Event) {
                 }
                 RenameMode::To => {
                      if let Some(path) = event.paths.first() {
-                         handle_upsert(state, path).await;
+                         let _ = state.storage_service.sync_external_change(path).await;
                     }
                 }
                 RenameMode::From => {
                      if let Some(path) = event.paths.first() {
-                         handle_delete(state, path).await;
+                         let _ = state.storage_service.remove_external_change(path).await;
                     }
                 }
                 _ => {}
@@ -156,12 +141,12 @@ async fn process_event(state: &AppState, event: Event) {
         }
         EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_)) | EventKind::Access(AccessKind::Close(_)) => {
              for path in &event.paths {
-                 handle_upsert(state, path).await;
+                 let _ = state.storage_service.sync_external_change(path).await;
              }
         }
         EventKind::Remove(_) => {
              for path in &event.paths {
-                 handle_delete(state, path).await;
+                 let _ = state.storage_service.remove_external_change(path).await;
              }
         }
         _ => {}
@@ -178,249 +163,10 @@ async fn handle_rename(state: &AppState, from: &Path, to: &Path) {
     let to_hidden = is_hidden(to);
 
     if from_hidden && !to_hidden {
-        // .part -> file : Created
-        println!("Watcher: Atomic Upload Detected {:?} -> {:?}", from, to);
-        handle_upsert(state, to).await;
+        let _ = state.storage_service.sync_external_change(to).await;
     } else if !from_hidden && to_hidden {
-        // file -> .hidden : Deleted
-        handle_delete(state, from).await;
+        let _ = state.storage_service.remove_external_change(from).await;
     } else if !from_hidden && !to_hidden {
-        // file -> file : Moved/Renamed
-        handle_move(state, from, to).await;
+        let _ = state.storage_service.move_external_change(from, to).await;
     }
 }
-
-struct FileInfo {
-    user_id: Uuid,
-    parent_dir: String,
-    name: String,
-    _is_dir: bool,
-    size: i64,
-    mime: String,
-    storage_type: String,
-}
-
-async fn parse_path(state: &AppState, path: &Path) -> Option<FileInfo> {
-    let storage_base = PathBuf::from(&state.storage_path).join("vol1/User");
-    
-    // println!("ParsePath: checking {:?} against base {:?}", path, storage_base);
-
-    let rel_path = match path.strip_prefix(&storage_base) {
-        Ok(p) => p,
-        Err(_) => {
-            // println!("ParsePath: Mismatch! Path does not start with base.");
-            return None;
-        }
-    };
-
-    let rel_path_str = rel_path.to_string_lossy();
-    let parts: Vec<&str> = rel_path_str.split('/').collect();
-    if parts.is_empty() || parts[0].is_empty() {
-        return None;
-    }
-    
-    if is_hidden(path) {
-        // println!("ParsePath: File is hidden, skipping: {:?}", path);
-        return None;
-    }
-
-    // vol1/User/username/...
-    let username = parts[0];
-    let virtual_rel_path = if parts.len() > 1 { parts[1..].join("/") } else { "".to_string() };
-    
-    let user_id_result = sqlx::query_scalar::<_, Uuid>("select id from users where username = $1")
-        .bind(username)
-        .fetch_optional(&state.db)
-        .await;
-
-    let (user_id, virtual_path) = match user_id_result {
-        Ok(Some(id)) => (id, format!("/{}", virtual_rel_path)),
-        _ => return None,
-    };
-
-    // Construct Virtual Path info
-    let parent_dir = Path::new(&virtual_path)
-        .parent()
-        .unwrap_or(Path::new("/"))
-        .to_string_lossy()
-        .to_string();
-    let parent_dir = if parent_dir == "/" { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
-    
-    let name = Path::new(&virtual_path)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-
-    if name.is_empty() { return None; }
-
-    let is_dir = path.is_dir();
-    let size = if is_dir { 0 } else { path.metadata().map(|m| m.len()).unwrap_or(0) as i64 };
-    let storage_type = if is_dir { "dir" } else { "file" };
-    let mime = if is_dir { "directory".to_string() } else { mime_guess::from_path(&path).first_or_octet_stream().to_string() };
-
-    Some(FileInfo {
-        user_id,
-        parent_dir,
-        name,
-        _is_dir: is_dir,
-        size,
-        mime,
-        storage_type: storage_type.to_string(),
-    })
-}
-
-async fn handle_upsert(state: &AppState, path: &Path) {
-    println!("HandleUpsert: Processing {:?}", path);
-    if let Some(info) = parse_path(state, path).await {
-         // Check if exists first to handle non-unique index
-         println!("HandleUpsert: Parsed info for {}", info.name);
-         let exists: bool = sqlx::query_scalar::<_, i64>("SELECT 1 FROM cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3")
-            .bind(&info.user_id)
-            .bind(&info.parent_dir)
-            .bind(&info.name)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None)
-            .is_some();
-
-        if exists {
-             let _ = sqlx::query("UPDATE cloud_files SET size = $1, mime = $2, updated_at = datetime('now') WHERE user_id = $3 AND dir = $4 AND name = $5")
-                .bind(info.size)
-                .bind(&info.mime)
-                .bind(&info.user_id)
-                .bind(&info.parent_dir)
-                .bind(&info.name)
-                .execute(&state.db)
-                .await;
-        } else {
-            let _ = sqlx::query("INSERT INTO cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) 
-                VALUES ($1, $2, $3, $4, $5, $6, $7, datetime('now'), datetime('now'))")
-                .bind(uuid::Uuid::new_v4().to_string())
-                .bind(&info.user_id)
-                .bind(&info.name)
-                .bind(&info.parent_dir)
-                .bind(info.size)
-                .bind(&info.mime)
-                .bind(&info.storage_type)
-                .execute(&state.db)
-                .await;
-        }
-    }
-}
-
-async fn handle_delete(state: &AppState, path: &Path) {
-    let storage_base = PathBuf::from(&state.storage_path).join("vol1/User");
-    
-    let rel_path = match path.strip_prefix(&storage_base) {
-        Ok(p) => p.to_string_lossy(),
-        Err(_) => return,
-    };
-    
-    let parts: Vec<&str> = rel_path.split('/').collect();
-    if parts.is_empty() { return; }
-    
-    if is_hidden(path) { return; }
-
-    let username = parts[0];
-    let virtual_rel_path = if parts.len() > 1 { parts[1..].join("/") } else { "".to_string() };
-    
-    let user_id: Option<Uuid> = sqlx::query_scalar("select id from users where username = $1")
-        .bind(username)
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-        
-    let (user_id, virtual_path) = match user_id {
-        Some(uid) => (uid, format!("/{}", virtual_rel_path)),
-        None => return,
-    };
-        
-    let parent_dir = Path::new(&virtual_path).parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
-    let parent_dir = if parent_dir == "/" { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
-    let name = Path::new(&virtual_path).file_name().unwrap_or_default().to_string_lossy().to_string();
-    
-    if !name.is_empty() {
-        let _ = sqlx::query("DELETE FROM cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3")
-            .bind(&user_id)
-            .bind(&parent_dir)
-            .bind(&name)
-            .execute(&state.db)
-            .await;
-    }
-}
-
-async fn handle_move(state: &AppState, from: &Path, to: &Path) {
-    // For move, we want to update the entry.
-    // We need old coords and new coords.
-    // Re-use logic from handle_delete (old) and handle_upsert (new).
-    
-    // Parse From
-    let path_str_from = from.to_string_lossy();
-    let storage_base = format!("{}/vol1/User/", state.storage_path);
-    if !path_str_from.starts_with(&storage_base) {
-        // Not a User file move (e.g. AppData). Fallback to Delete + Upsert
-        handle_delete(state, from).await;
-        handle_upsert(state, to).await;
-        return; 
-    }
-    let rel_path_from = &path_str_from[storage_base.len()..];
-    let parts_from: Vec<&str> = rel_path_from.splitn(2, '/').collect();
-    let username_from = parts_from[0];
-    let virtual_rel_path_from = if parts_from.len() > 1 { parts_from[1] } else { "" };
-    
-    // Parse To
-    let path_str_to = to.to_string_lossy();
-    if !path_str_to.starts_with(&storage_base) { return; }
-    let rel_path_to = &path_str_to[storage_base.len()..];
-    let parts_to: Vec<&str> = rel_path_to.splitn(2, '/').collect();
-    let username_to = parts_to[0]; // Should be same usually
-    let virtual_rel_path_to = if parts_to.len() > 1 { parts_to[1] } else { "" };
-    
-    if username_from != username_to {
-        // Cross-user move? Treat as delete + create
-        handle_delete(state, from).await;
-        handle_upsert(state, to).await;
-        return;
-    }
-    
-    let user_id: Option<Uuid> = sqlx::query_scalar("select id from users where username = $1")
-        .bind(username_from)
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-        
-    if let Some(uid) = user_id {
-        // Old Coords
-        let v_from = format!("/{}", virtual_rel_path_from);
-        let p_from = Path::new(&v_from).parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
-        let p_from = if p_from == "/" { "/".to_string() } else if p_from.starts_with('/') { p_from } else { format!("/{}", p_from) };
-        let n_from = Path::new(&v_from).file_name().unwrap_or_default().to_string_lossy().to_string();
-        
-        // New Coords
-        let v_to = format!("/{}", virtual_rel_path_to);
-        let p_to = Path::new(&v_to).parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
-        let p_to = if p_to == "/" { "/".to_string() } else if p_to.starts_with('/') { p_to } else { format!("/{}", p_to) };
-        let n_to = Path::new(&v_to).file_name().unwrap_or_default().to_string_lossy().to_string();
-        
-        // Update
-        let res = sqlx::query("UPDATE cloud_files SET dir = $1, name = $2, updated_at = datetime('now') WHERE user_id = $3 AND dir = $4 AND name = $5")
-            .bind(&p_to)
-            .bind(&n_to)
-            .bind(&uid)
-            .bind(&p_from)
-            .bind(&n_from)
-            .execute(&state.db)
-            .await;
-            
-        // If update failed (e.g. row not found), try upsert
-        if let Ok(r) = res {
-            if r.rows_affected() == 0 {
-                handle_upsert(state, to).await;
-            }
-        } else {
-             handle_upsert(state, to).await;
-        }
-    }
-}
-

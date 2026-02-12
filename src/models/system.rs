@@ -60,6 +60,7 @@ pub struct NetworkInfo {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct HealthResp {
     pub status: String,
     pub ts: i64,

@@ -4,65 +4,25 @@ use axum::{
     http::StatusCode,
 };
 use crate::state::AppState;
-use crate::models::task::{FileTask, CreateTaskReq, UpdateTaskReq};
+use crate::models::task::{CreateTaskReq, UpdateTaskReq};
+use crate::core::Result;
 
-pub async fn list_tasks(State(state): State<AppState>) -> impl IntoResponse {
-    let tasks = sqlx::query_as::<_, FileTask>("select * from file_tasks order by created_at asc")
-        .fetch_all(&state.db)
-        .await;
-
-    match tasks {
-        Ok(t) => Json(t).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+pub async fn list_tasks(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let tasks = state.task_service.list_tasks().await?;
+    Ok(Json(tasks))
 }
 
-pub async fn create_task(State(state): State<AppState>, Json(payload): Json<CreateTaskReq>) -> impl IntoResponse {
-    let res = sqlx::query(
-        "insert into file_tasks (id, type, name, dir, progress, status) values ($1, $2, $3, $4, $5, $6)"
-    )
-    .bind(&payload.id)
-    .bind(&payload.task_type)
-    .bind(&payload.name)
-    .bind(&payload.dir)
-    .bind(payload.progress)
-    .bind(&payload.status)
-    .execute(&state.db)
-    .await;
-
-    match res {
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+pub async fn create_task(State(state): State<AppState>, Json(payload): Json<CreateTaskReq>) -> Result<impl IntoResponse> {
+    state.task_service.create_task(payload).await?;
+    Ok(StatusCode::OK)
 }
 
-pub async fn update_task(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<UpdateTaskReq>) -> impl IntoResponse {
-    if let Some(p) = payload.progress {
-         let _ = sqlx::query("update file_tasks set progress = $1, updated_at = datetime('now') where id = $2")
-            .bind(p)
-            .bind(&id)
-            .execute(&state.db)
-            .await;
-    }
-    
-    if let Some(s) = &payload.status {
-         let _ = sqlx::query("update file_tasks set status = $1, updated_at = datetime('now') where id = $2")
-            .bind(s)
-            .bind(&id)
-            .execute(&state.db)
-            .await;
-    }
-    
-    StatusCode::OK.into_response()
+pub async fn update_task(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<UpdateTaskReq>) -> Result<impl IntoResponse> {
+    state.task_service.update_task(id, payload).await?;
+    Ok(StatusCode::OK)
 }
 
-pub async fn clear_completed_tasks(State(state): State<AppState>) -> impl IntoResponse {
-    let res = sqlx::query("delete from file_tasks where status in ('done', 'error')")
-        .execute(&state.db)
-        .await;
-
-    match res {
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+pub async fn clear_completed_tasks(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    state.task_service.clear_completed_tasks().await?;
+    Ok(StatusCode::OK)
 }

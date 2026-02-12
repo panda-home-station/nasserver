@@ -16,20 +16,15 @@ pub struct DocsMkdirReq {
 pub struct DocsRenameReq {
     pub from: Option<String>,
     pub to: Option<String>,
-    pub id: Option<String>,
-    pub new_name: Option<String>,
-    pub new_dir: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct DocsDownloadQuery {
-    pub id: Option<String>,
     pub path: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct DocsDeleteQuery {
-    pub id: Option<String>,
     pub path: Option<String>,
 }
 

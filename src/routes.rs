@@ -10,6 +10,7 @@ use axum::extract::DefaultBodyLimit;
 
 use crate::state::AppState;
 use crate::handlers::{auth, system, device, docker, docs};
+use crate::api::apps;
 use crate::middleware::require_auth;
 
 pub fn api_app(state: AppState) -> Router {
@@ -44,8 +45,8 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/podman/container/stop", post(docker::stop_container))
         .route("/api/podman/container/restart", post(docker::restart_container))
         .route("/api/podman/container/remove", post(docker::remove_container))
-        .route("/api/podman/container/create", post(docker::create_container))
-        .route("/api/podman/image/pull", post(docker::pull_image))
+        // .route("/api/podman/container/create", post(docker::create_container))
+        // .route("/api/podman/image/pull", post(docker::pull_image))
         .route("/api/podman/image/remove", post(docker::remove_image))
         // Registry
         .route("/api/podman/registry/search", get(crate::handlers::docker_registry::search))
@@ -67,6 +68,12 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/agent/tasks/:id", get(crate::handlers::agent::get_task))
         .route("/api/system/stats", get(system::get_current_stats))
         .route("/api/system/stats/history", get(system::get_stats_history))
+        // New App Management API
+        .route("/api/apps", get(apps::list_apps))
+        .route("/api/apps", post(apps::install_app))
+        .route("/api/apps/:id/start", post(apps::start_app))
+        .route("/api/apps/:id/stop", post(apps::stop_app))
+        .route("/api/apps/:id", delete(apps::uninstall_app))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
