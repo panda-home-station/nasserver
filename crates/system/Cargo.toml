@@ -1,0 +1,23 @@
+[package]
+name = "system"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+ash = { workspace = true }
+password-hash = { workspace = true }
+argon2 = { workspace = true }
+rand_core = { workspace = true }
+sysinfo = { workspace = true }
+local-ip-address = { workspace = true }
+fastrand = { workspace = true }
+common = { workspace = true }
+models = { workspace = true }
+gpu = { workspace = true }
+async-trait = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "task"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+sqlx = { workspace = true }
+common = { workspace = true }
+models = { workspace = true }
+async-trait = { workspace = true }

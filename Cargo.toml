@@ -1,12 +1,24 @@
-[package]
-name = "pnas-server"
+[workspace]
+members = [
+    "crates/common",
+    "crates/models",
+    "crates/auth",
+    "crates/system",
+    "crates/storage",
+    "crates/container",
+    "crates/downloader",
+    "crates/task",
+    "crates/agent",
+    "crates/gpu",
+    "crates/server",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.0.1"
 edition = "2021"
 
-[lints.rust]
-warnings = "deny"
-
-[dependencies]
+[workspace.dependencies]
 axum = { version = "0.7", features = ["macros", "json", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -40,6 +52,18 @@ ash = "0.37"
 librqbit = "8.1"
 librqbit-core = "5.0"
 notify = "8.2.0"
+tokio-stream = "0.1"
 mime_guess = "2.0.5"
 thiserror = "2.0.18"
 async-trait = "0.1.89"
+
+common = { path = "crates/common" }
+models = { path = "crates/models" }
+auth = { path = "crates/auth" }
+system = { path = "crates/system" }
+storage = { path = "crates/storage" }
+container = { path = "crates/container" }
+downloader = { path = "crates/downloader" }
+task = { path = "crates/task" }
+agent = { path = "crates/agent" }
+gpu = { path = "crates/gpu" }

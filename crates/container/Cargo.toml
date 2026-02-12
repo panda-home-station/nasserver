@@ -1,0 +1,13 @@
+[package]
+name = "container"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+bollard = { workspace = true }
+common = { workspace = true }
+models = { workspace = true }
+async-trait = { workspace = true }
+libc = { workspace = true }

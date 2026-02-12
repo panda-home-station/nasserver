@@ -1,0 +1,11 @@
+[package]
+name = "gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ash = { workspace = true }
+bollard = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+common = { workspace = true }

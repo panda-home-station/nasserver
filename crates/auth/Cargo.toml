@@ -1,0 +1,17 @@
+[package]
+name = "auth"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+argon2 = { workspace = true }
+password-hash = { workspace = true }
+chrono = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde_json = { workspace = true }
+rand_core = { workspace = true }
+common = { workspace = true }
+models = { workspace = true }

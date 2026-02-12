@@ -6,9 +6,9 @@ RUN rustup target add ${SERVER_TARGET}
 WORKDIR /src/nasserver
 COPY Cargo.toml Cargo.lock* ./
 RUN mkdir -p src
-COPY src ./src
-RUN cargo build --release --target ${SERVER_TARGET}
-RUN mkdir -p /artifacts/server && cp target/${SERVER_TARGET}/release/pnas-server /artifacts/server/pnas-server
+COPY . .
+RUN cargo build --release --target ${SERVER_TARGET} --bin server
+RUN mkdir -p /artifacts/server && cp target/${SERVER_TARGET}/release/server /artifacts/server/pnas-server
 
 FROM alpine:3.19 AS packager
 RUN apk add --no-cache squashfs-tools

@@ -1,0 +1,42 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
+dotenvy = { workspace = true }
+common = { workspace = true }
+models = { workspace = true }
+auth = { workspace = true }
+system = { workspace = true }
+storage = { workspace = true }
+container = { workspace = true }
+downloader = { workspace = true }
+task = { workspace = true }
+agent = { workspace = true }
+gpu = { workspace = true }
+mime_guess = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+fastrand = { workspace = true }
+once_cell = { workspace = true }
+async-trait = { workspace = true }
+notify = { workspace = true }
+librqbit = { workspace = true }
+reqwest = { workspace = true }
+urlencoding = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+jsonwebtoken = { workspace = true }
