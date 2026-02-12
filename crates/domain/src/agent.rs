@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use crate::Result;
-pub use crate::entities::agent::{AgentTask, TaskRequest, TaskResponse, ChatRequest, ChatResponse, ChatMessage, TaskStep};
+pub use crate::entities::agent::{AgentTask, TaskStep};
+pub use crate::dtos::agent::{TaskRequest, TaskResponse, ChatRequest, ChatResponse, ChatMessage};
 // Remove models import
 use axum::response::sse::Event;
 use futures_util::stream::BoxStream;

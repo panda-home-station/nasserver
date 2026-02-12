@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use crate::Result;
-pub use crate::entities::docs::{
+pub use crate::entities::docs::DocsEntry;
+pub use crate::dtos::docs::{
     DocsListQuery, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery,
-    DocsEntry, DocsListResp
+    DocsListResp
 };
 use std::path::{Path, PathBuf};
 

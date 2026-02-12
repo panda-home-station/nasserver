@@ -57,8 +57,3 @@ pub struct NetworkIpamConfig {
     pub subnet: Option<String>,
     pub gateway: Option<String>,
 }
-
-#[derive(Deserialize, Clone, Debug)]
-pub struct IdReq {
-    pub id: String,
-}

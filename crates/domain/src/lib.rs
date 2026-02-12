@@ -1,5 +1,6 @@
 pub mod error;
 pub mod entities;
+pub mod dtos;
 pub mod auth;
 pub mod system;
 pub mod storage;

@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use crate::Result;
-pub use crate::entities::downloader::{
-    DownloadTask, TorrentFileMetadata, ResolveMagnetResp,
+pub use crate::entities::downloader::{DownloadTask, TorrentFileMetadata};
+pub use crate::dtos::downloader::{
     CreateDownloadReq, ControlDownloadReq, ResolveMagnetReq, StartMagnetDownloadReq,
-    DownloadTaskResp, SubTaskResp
+    ResolveMagnetResp, DownloadTaskResp, SubTaskResp
 };
 // Remove models import
 use serde::Serialize;

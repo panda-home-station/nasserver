@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use crate::Result;
-pub use crate::entities::container::{ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig, IdReq};
+pub use crate::entities::container::{ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig};
+pub use crate::dtos::container::IdReq;
 pub use crate::entities::app::{App, AppStatus, AppType};
 
 #[async_trait]

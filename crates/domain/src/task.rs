@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use crate::Result;
-pub use crate::entities::task::{FileTask, CreateTaskReq, UpdateTaskReq};
+pub use crate::entities::task::FileTask;
+pub use crate::dtos::task::{CreateTaskReq, UpdateTaskReq};
 // Remove models import
 
 #[async_trait]
