@@ -96,8 +96,11 @@ impl AuthService for AuthServiceImpl {
     }
 
     async fn get_user_by_id(&self, user_id: &str) -> Result<serde_json::Value> {
+        // Try to parse as Uuid to ensure format matching if DB uses Uuid type
+        let uid = Uuid::parse_str(user_id).map_err(|e| DomainError::BadRequest(format!("Invalid UUID: {}", e)))?;
+        
         let username = sqlx::query_scalar::<_, String>("select username from users where id = $1")
-            .bind(user_id)
+            .bind(uid) // Bind as Uuid, not &str
             .fetch_optional(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
