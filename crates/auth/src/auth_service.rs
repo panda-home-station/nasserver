@@ -116,8 +116,9 @@ impl AuthService for AuthServiceImpl {
     }
 
     async fn get_wallpaper(&self, user_id: &str) -> Result<Option<String>> {
+        let uid = Uuid::parse_str(user_id).map_err(|e| DomainError::BadRequest(format!("Invalid UUID: {}", e)))?;
         let wallpaper = sqlx::query_scalar::<_, Option<String>>("select wallpaper from users where id = $1")
-            .bind(user_id)
+            .bind(uid)
             .fetch_optional(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?
@@ -127,9 +128,10 @@ impl AuthService for AuthServiceImpl {
     }
 
     async fn set_wallpaper(&self, user_id: &str, path: &str) -> Result<()> {
+        let uid = Uuid::parse_str(user_id).map_err(|e| DomainError::BadRequest(format!("Invalid UUID: {}", e)))?;
         sqlx::query("update users set wallpaper = $1 where id = $2")
             .bind(path)
-            .bind(user_id)
+            .bind(uid)
             .execute(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
