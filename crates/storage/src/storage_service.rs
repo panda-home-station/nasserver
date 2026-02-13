@@ -3,17 +3,17 @@ use crate::StorageService;
 use domain::{Result, Error as DomainError, storage::{
     DocsListQuery, DocsListResp, DocsEntry, DocsMkdirReq, DocsRenameReq, DocsDeleteQuery
 }};
-use sqlx::{Pool, Sqlite, Row};
+use sqlx::{Pool, Postgres, Row};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
 pub struct StorageServiceImpl {
-    db: Pool<Sqlite>,
+    db: Pool<Postgres>,
     storage_path: String,
 }
 
 impl StorageServiceImpl {
-    pub fn new(db: Pool<Sqlite>, storage_path: String) -> Self {
+    pub fn new(db: Pool<Postgres>, storage_path: String) -> Self {
         Self { db, storage_path }
     }
 
@@ -159,7 +159,7 @@ impl StorageService for StorageServiceImpl {
                 .fetch_one(&self.db)
                 .await?;
 
-            sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, datetime('now'), datetime('now'))")
+            sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
                 .bind(uuid::Uuid::new_v4().to_string())
                 .bind(user_id)
                 .bind(name)
@@ -283,7 +283,7 @@ impl StorageService for StorageServiceImpl {
                 .unwrap_or(false);
 
             if exists {
-                sqlx::query("update cloud_files set size = $1, mime = $2, updated_at = datetime('now') where user_id = $3 and dir = $4 and name = $5")
+                sqlx::query("update cloud_files set size = $1, mime = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
                     .bind(size)
                     .bind(mime)
                     .bind(user_id)
@@ -292,7 +292,7 @@ impl StorageService for StorageServiceImpl {
                     .execute(&self.db)
                     .await?;
             } else {
-                sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, 'local', datetime('now'), datetime('now'))")
+                sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, 'local', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
                     .bind(uuid::Uuid::new_v4().to_string())
                     .bind(user_id)
                     .bind(name)
@@ -310,7 +310,7 @@ impl StorageService for StorageServiceImpl {
     async fn run_trash_purger(&self) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(24 * 3600)).await;
-            let rows = sqlx::query("select id from cloud_files where dir like '/Trash%' and updated_at < datetime('now', '-30 day')")
+            let rows = sqlx::query("select id from cloud_files where dir like '/Trash%' and updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'")
                 .fetch_all(&self.db)
                 .await
                 .unwrap_or_default();
@@ -331,7 +331,7 @@ impl StorageService for StorageServiceImpl {
                 .await?;
 
             if exists {
-                sqlx::query("update cloud_files set size = $1, mime = $2, updated_at = datetime('now') where user_id = $3 and dir = $4 and name = $5")
+                sqlx::query("update cloud_files set size = $1, mime = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
                     .bind(info.size)
                     .bind(&info.mime)
                     .bind(info.user_id)
@@ -340,7 +340,7 @@ impl StorageService for StorageServiceImpl {
                     .execute(&self.db)
                     .await?;
             } else {
-                sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, datetime('now'), datetime('now'))")
+                sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
                     .bind(uuid::Uuid::new_v4().to_string())
                     .bind(info.user_id)
                     .bind(&info.name)
@@ -373,7 +373,7 @@ impl StorageService for StorageServiceImpl {
 
         match (from_info, to_info) {
             (Some(f), Some(t)) if f.user_id == t.user_id => {
-                let res = sqlx::query("update cloud_files set dir = $1, name = $2, updated_at = datetime('now') where user_id = $3 and dir = $4 and name = $5")
+                let res = sqlx::query("update cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
                     .bind(&t.parent_dir)
                     .bind(&t.name)
                     .bind(f.user_id)

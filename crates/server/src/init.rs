@@ -21,15 +21,7 @@ pub async fn init() -> AppState {
     let _ = std::fs::create_dir_all(format!("{}/vol1/User", &storage_path));
     let _ = std::fs::create_dir_all(format!("{}/vol1/AppData", &storage_path));
 
-    let mut db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        let db_dir = format!("{}/db", storage_path);
-        let _ = std::fs::create_dir_all(&db_dir);
-        format!("sqlite://{}/pnas.db", db_dir)
-    });
-    
-    if db_url.starts_with("sqlite:/") && !db_url.starts_with("sqlite:///") {
-        db_url = db_url.replacen("sqlite:/", "sqlite:///", 1);
-    }
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for PostgreSQL");
 
     let pool = db::init_db(&db_url).await;
     

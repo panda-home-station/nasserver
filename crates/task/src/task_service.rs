@@ -1,13 +1,13 @@
 use domain::{Result, task::{TaskService, FileTask, CreateTaskReq, UpdateTaskReq}};
 use async_trait::async_trait;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Postgres};
 
 pub struct TaskServiceImpl {
-    db: Pool<Sqlite>,
+    db: Pool<Postgres>,
 }
 
 impl TaskServiceImpl {
-    pub fn new(db: Pool<Sqlite>) -> Self {
+    pub fn new(db: Pool<Postgres>) -> Self {
         Self { db }
     }
 }
@@ -38,7 +38,7 @@ impl TaskService for TaskServiceImpl {
 
     async fn update_task(&self, id: String, req: UpdateTaskReq) -> Result<()> {
         if let Some(p) = req.progress {
-            sqlx::query("update file_tasks set progress = $1, updated_at = datetime('now') where id = $2")
+            sqlx::query("update file_tasks set progress = $1, updated_at = CURRENT_TIMESTAMP where id = $2")
                 .bind(p)
                 .bind(&id)
                 .execute(&self.db)
@@ -46,7 +46,7 @@ impl TaskService for TaskServiceImpl {
         }
         
         if let Some(s) = &req.status {
-            sqlx::query("update file_tasks set status = $1, updated_at = datetime('now') where id = $2")
+            sqlx::query("update file_tasks set status = $1, updated_at = CURRENT_TIMESTAMP where id = $2")
                 .bind(s)
                 .bind(&id)
                 .execute(&self.db)

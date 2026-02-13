@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use once_cell::sync::Lazy;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Postgres};
 use domain::auth::AuthService;
 use domain::system::SystemService;
 use domain::storage::StorageService;
@@ -16,7 +16,7 @@ pub static START_TIME: Lazy<chrono::DateTime<Utc>> = Lazy::new(|| Utc::now());
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Pool<Sqlite>,
+    pub db: Pool<Postgres>,
     pub jwt_secret: String,
     pub storage_path: String,
     pub app_manager: Arc<dyn AppManager>,

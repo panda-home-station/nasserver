@@ -1,16 +1,17 @@
 use async_trait::async_trait;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Postgres};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
 use librqbit::{Session, AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent};
-use domain::{Result, Error, downloader::{
-    DownloaderService, DownloadTask, CreateDownloadReq, ResolveMagnetReq, ResolveMagnetResp, 
-    StartMagnetDownloadReq, TorrentFileMetadata, DownloadTaskResp, SubTaskResp, ControlDownloadReq,
-    DownloadStats
-}};
 use chrono::Utc;
+use domain::{Result, Error};
+use domain::downloader::{
+    DownloaderService, DownloadTask, CreateDownloadReq, ControlDownloadReq, DownloadStats, 
+    ResolveMagnetReq, ResolveMagnetResp, StartMagnetDownloadReq, DownloadTaskResp, SubTaskResp,
+    TorrentFileMetadata
+};
 use uuid::Uuid;
 use tokio::task::AbortHandle;
 use bytes::Bytes;
@@ -19,7 +20,7 @@ use std::time::Instant;
 use std::str::FromStr;
 
 pub struct DownloaderServiceImpl {
-    db: Pool<Sqlite>,
+    db: Pool<Postgres>,
     storage_path: String,
     torrent_session: Arc<Session>,
     magnet_cache: Arc<Mutex<HashMap<String, Bytes>>>,
@@ -28,7 +29,7 @@ pub struct DownloaderServiceImpl {
 
 impl DownloaderServiceImpl {
     pub fn new(
-        db: Pool<Sqlite>,
+        db: Pool<Postgres>,
         storage_path: String,
         torrent_session: Arc<Session>,
     ) -> Self {
@@ -80,10 +81,10 @@ impl DownloaderServiceImpl {
                 .unwrap_or(false);
                 
             if !exists {
-                let id = Uuid::new_v4().to_string();
-                let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, 0, 'dir', datetime('now'), datetime('now'))")
+                let id = Uuid::new_v4();
+                let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, 0, 'dir', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
                     .bind(id)
-                    .bind(user_id)
+                    .bind(Uuid::from_str(user_id).unwrap_or_default())
                     .bind(name)
                     .bind(&parent_dir)
                     .execute(&self.db)
@@ -225,7 +226,7 @@ impl DownloaderService for DownloaderServiceImpl {
                 .unwrap_or_else(|| "magnet_download".to_string());
                 
             let task = DownloadTask {
-                id: id.clone(),
+                id: Uuid::parse_str(&id).unwrap_or_default(),
                 url: url.clone(),
                 path: save_dir.clone(),
                 filename: filename.clone(),
@@ -234,8 +235,8 @@ impl DownloaderService for DownloaderServiceImpl {
                 total_bytes: 0,
                 downloaded_bytes: 0,
                 speed: 0,
-                created_at: Utc::now().naive_utc(),
-                updated_at: Utc::now().naive_utc(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
                 error_msg: None,
             };
 
@@ -267,7 +268,7 @@ impl DownloaderService for DownloaderServiceImpl {
         let path = format!("{}/{}", save_dir, filename);
 
         let task = DownloadTask {
-            id: id.clone(),
+            id: Uuid::parse_str(&id).unwrap_or_default(),
             url: url.clone(),
             path: path.clone(),
             filename: filename.clone(),
@@ -276,8 +277,8 @@ impl DownloaderService for DownloaderServiceImpl {
             total_bytes: 0,
             downloaded_bytes: 0,
             speed: 0,
-            created_at: Utc::now().naive_utc(),
-            updated_at: Utc::now().naive_utc(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
             error_msg: None,
         };
 
@@ -299,7 +300,7 @@ impl DownloaderService for DownloaderServiceImpl {
         .execute(&self.db)
         .await?;
 
-        self.spawn_http_download(id, url, path, user_id).await;
+        self.spawn_http_download(task.id.to_string(), url, path, user_id).await;
         Ok(())
     }
 
@@ -348,7 +349,7 @@ impl DownloaderService for DownloaderServiceImpl {
                         }
                     }
                 } else {
-                    self.spawn_http_download(task.id, task.url, task.path, "1".to_string()).await; // FIXME: user_id
+                    self.spawn_http_download(task.id.to_string(), task.url, task.path, "1".to_string()).await; // FIXME: user_id
                 }
 
                 sqlx::query("update downloads set status = 'downloading' where id = $1")
@@ -487,7 +488,7 @@ impl DownloaderService for DownloaderServiceImpl {
                     let torrent_name: String = handle.name().unwrap_or(torrent_name.clone());
 
                     let task = DownloadTask {
-                        id: id.clone(),
+                        id: Uuid::parse_str(&id).unwrap_or_default(),
                         url: magnet_url, 
                         path: save_dir.clone(),
                         filename: torrent_name, 
@@ -496,8 +497,8 @@ impl DownloaderService for DownloaderServiceImpl {
                         total_bytes: 0,
                         downloaded_bytes: 0,
                         speed: 0,
-                        created_at: Utc::now().naive_utc(),
-                        updated_at: Utc::now().naive_utc(),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
                         error_msg: None,
                     };
                     
@@ -635,7 +636,7 @@ impl DownloaderServiceImpl {
     }
 }
 
-async fn sync_file_to_db_internal(db: &Pool<Sqlite>, user_id: &str, physical_path: &Path, virtual_dir: &str) {
+async fn sync_file_to_db_internal(db: &Pool<Postgres>, user_id: &str, physical_path: &Path, virtual_dir: &str) {
     if !physical_path.exists() { return; }
     
     let name = physical_path.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -650,7 +651,7 @@ async fn sync_file_to_db_internal(db: &Pool<Sqlite>, user_id: &str, physical_pat
         .unwrap_or(false);
         
     if exists {
-        let _ = sqlx::query("update cloud_files set size = $1, updated_at = datetime('now') where user_id = $2 and dir = $3 and name = $4")
+        let _ = sqlx::query("update cloud_files set size = $1, updated_at = CURRENT_TIMESTAMP where user_id = $2 and dir = $3 and name = $4")
             .bind(size as i64)
             .bind(user_id)
             .bind(virtual_dir)
@@ -659,7 +660,7 @@ async fn sync_file_to_db_internal(db: &Pool<Sqlite>, user_id: &str, physical_pat
             .await;
     } else {
         let id = Uuid::new_v4().to_string();
-        let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, 'file', datetime('now'), datetime('now'))")
+        let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, 'file', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
             .bind(id)
             .bind(user_id)
             .bind(&name)
@@ -670,7 +671,7 @@ async fn sync_file_to_db_internal(db: &Pool<Sqlite>, user_id: &str, physical_pat
     }
 }
 
-async fn ensure_directory_exists_internal(db: &Pool<Sqlite>, user_id: &str, virtual_dir: &str) {
+async fn ensure_directory_exists_internal(db: &Pool<Postgres>, user_id: &str, virtual_dir: &str) {
     if virtual_dir == "/" { return; }
     
     let parts: Vec<&str> = virtual_dir.split('/').filter(|x| !x.is_empty()).collect();
@@ -690,7 +691,7 @@ async fn ensure_directory_exists_internal(db: &Pool<Sqlite>, user_id: &str, virt
             
         if !exists {
             let id = Uuid::new_v4().to_string();
-            let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, 0, 'dir', datetime('now'), datetime('now'))")
+            let _ = sqlx::query("insert into cloud_files (id, user_id, name, dir, size, storage, created_at, updated_at) values ($1, $2, $3, $4, 0, 'dir', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
                 .bind(id)
                 .bind(user_id)
                 .bind(name)
@@ -707,7 +708,7 @@ async fn ensure_directory_exists_internal(db: &Pool<Sqlite>, user_id: &str, virt
     }
 }
 
-async fn download_process_internal(db: Pool<Sqlite>, download_tasks: Arc<Mutex<HashMap<String, AbortHandle>>>, id: String, url: String, path: String, user_id: String) {
+async fn download_process_internal(db: Pool<Postgres>, download_tasks: Arc<Mutex<HashMap<String, AbortHandle>>>, id: String, url: String, path: String, user_id: String) {
     let mut downloaded_offset: u64 = 0;
     if let Ok(metadata) = tokio::fs::metadata(&path).await {
         downloaded_offset = metadata.len();
@@ -795,7 +796,7 @@ async fn download_process_internal(db: Pool<Sqlite>, download_tasks: Arc<Mutex<H
                     let speed = (downloaded - last_downloaded) as f64 / last_update.elapsed().as_secs_f64();
                     let progress = if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 };
                     
-                    let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = datetime('now') where id = $5")
+                    let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = CURRENT_TIMESTAMP where id = $5")
                         .bind(downloaded as i64)
                         .bind(speed as i64)
                         .bind(progress)
@@ -821,7 +822,7 @@ async fn download_process_internal(db: Pool<Sqlite>, download_tasks: Arc<Mutex<H
         }
     }
 
-    let _ = sqlx::query("update downloads set status = 'done', progress = 100.0, speed = 0, updated_at = datetime('now') where id = $1")
+    let _ = sqlx::query("update downloads set status = 'done', progress = 100.0, speed = 0, updated_at = CURRENT_TIMESTAMP where id = $1")
         .bind(&id)
         .execute(&db)
         .await;
@@ -835,7 +836,7 @@ async fn download_process_internal(db: Pool<Sqlite>, download_tasks: Arc<Mutex<H
 }
 
 async fn monitor_torrent_process_internal(
-    db: Pool<Sqlite>,
+    db: Pool<Postgres>,
     torrent_session: Arc<Session>,
     download_tasks: Arc<Mutex<HashMap<String, AbortHandle>>>,
     id: String,
@@ -863,7 +864,7 @@ async fn monitor_torrent_process_internal(
         let progress = if total_bytes > 0 { (downloaded_bytes as f64 / total_bytes as f64) * 100.0 } else { 0.0 };
         let speed = stats.live.as_ref().map(|l| (l.download_speed.mbps * 1024.0 * 1024.0) as u64).unwrap_or(0);
         
-        let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = datetime('now') where id = $5")
+        let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = CURRENT_TIMESTAMP where id = $5")
             .bind(downloaded_bytes as i64)
             .bind(speed as i64)
             .bind(progress)
@@ -873,7 +874,7 @@ async fn monitor_torrent_process_internal(
             .await;
     }
     
-    let _ = sqlx::query("update downloads set status = 'done', progress = 100.0, speed = 0, updated_at = datetime('now') where id = $1")
+    let _ = sqlx::query("update downloads set status = 'done', progress = 100.0, speed = 0, updated_at = CURRENT_TIMESTAMP where id = $1")
         .bind(&id)
         .execute(&db)
         .await;

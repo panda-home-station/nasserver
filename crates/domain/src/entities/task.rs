@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use uuid::Uuid;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct FileTask {
-    pub id: String,
+    pub id: Uuid,
     #[serde(rename = "type")]
     pub task_type: String,
     pub name: String,

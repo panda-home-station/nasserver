@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Postgres};
 use uuid::Uuid;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use password_hash::SaltString;
@@ -11,13 +11,13 @@ use domain::{Result, Error as DomainError, auth::{SignupReq, SignupResp, LoginRe
 // Remove models import
 
 pub struct AuthServiceImpl {
-    db: Pool<Sqlite>,
+    db: Pool<Postgres>,
     jwt_secret: String,
     storage_path: String,
 }
 
 impl AuthServiceImpl {
-    pub fn new(db: Pool<Sqlite>, jwt_secret: String, storage_path: String) -> Self {
+    pub fn new(db: Pool<Postgres>, jwt_secret: String, storage_path: String) -> Self {
         Self { db, jwt_secret, storage_path }
     }
 }

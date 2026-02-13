@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use uuid::Uuid;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct DownloadTask {
-    pub id: String,
+    pub id: Uuid,
     pub url: String,
     pub path: String,
     pub filename: String,
@@ -12,8 +14,8 @@ pub struct DownloadTask {
     pub total_bytes: i64,
     pub downloaded_bytes: i64,
     pub speed: i64,
-    pub created_at: chrono::NaiveDateTime,
-    pub updated_at: chrono::NaiveDateTime,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
     pub error_msg: Option<String>,
 }
 

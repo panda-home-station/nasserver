@@ -5,7 +5,7 @@ use domain::entities::system::{
 };
 use domain::{Result, Error as DomainError};
 use async_trait::async_trait;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Postgres};
 use sysinfo::{System, Disks, Networks, Components};
 use std::sync::{Arc, Mutex};
 use chrono::{Utc, DateTime};
@@ -17,7 +17,7 @@ use std::fs;
 use ash::{Entry, vk};
 
 pub struct SystemServiceImpl {
-    db: Pool<Sqlite>,
+    db: Pool<Postgres>,
     pub start_time: DateTime<Utc>,
     sys: Arc<Mutex<System>>,
     disks: Arc<Mutex<Disks>>,
@@ -27,7 +27,7 @@ pub struct SystemServiceImpl {
 }
 
 impl SystemServiceImpl {
-    pub fn new(db: Pool<Sqlite>, start_time: DateTime<Utc>) -> Self {
+    pub fn new(db: Pool<Postgres>, start_time: DateTime<Utc>) -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -238,7 +238,7 @@ impl SystemService for SystemServiceImpl {
 
     async fn init_system(&self, req: InitReq) -> Result<()> {
         if self.is_initialized().await? {
-            return Err(DomainError::Internal("already_initialized".to_string()));
+            return Err(DomainError::Conflict("already_initialized".to_string()));
         }
 
         let salt = SaltString::generate(&mut rand_core::OsRng);
@@ -261,11 +261,11 @@ impl SystemService for SystemServiceImpl {
         }
         let device_id = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
-        sqlx::query("insert or replace into system_config (key, value) values ('device_name', $1)")
+        sqlx::query("INSERT INTO system_config (key, value) VALUES ('device_name', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
             .bind(&req.device_name)
             .execute(&self.db)
             .await?;
-        sqlx::query("insert or replace into system_config (key, value) values ('device_id', $1)")
+        sqlx::query("INSERT INTO system_config (key, value) VALUES ('device_id', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
             .bind(&device_id)
             .execute(&self.db)
             .await?;
@@ -480,7 +480,7 @@ impl SystemService for SystemServiceImpl {
     async fn set_docker_mirrors(&self, mirrors: Vec<serde_json::Value>) -> Result<()> {
         let json = serde_json::to_string(&mirrors)
             .map_err(|e| DomainError::Internal(e.to_string()))?;
-        sqlx::query("insert or replace into system_config (key, value) values ('docker_mirrors', $1)")
+        sqlx::query("INSERT INTO system_config (key, value) VALUES ('docker_mirrors', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
             .bind(json)
             .execute(&self.db)
             .await?;
@@ -500,7 +500,7 @@ impl SystemService for SystemServiceImpl {
     async fn set_docker_settings(&self, settings: serde_json::Value) -> Result<()> {
         let json = serde_json::to_string(&settings)
             .map_err(|e| DomainError::Internal(e.to_string()))?;
-        sqlx::query("insert or replace into system_config (key, value) values ('docker_mirror', $1)")
+        sqlx::query("INSERT INTO system_config (key, value) VALUES ('docker_mirror', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
             .bind(json)
             .execute(&self.db)
             .await?;
