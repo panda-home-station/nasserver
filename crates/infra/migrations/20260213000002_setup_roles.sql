@@ -15,6 +15,7 @@ $$;
 -- 2. Schema 级权限分配
 -- 授予 Schema 的访问权限
 GRANT USAGE ON SCHEMA sys TO role_sys;
+GRANT USAGE ON SCHEMA sys TO role_storage; -- role_storage 需要进入 sys 模式以查询 users 表
 GRANT USAGE ON SCHEMA storage TO role_storage;
 
 -- 3. 表级权限分配

@@ -93,7 +93,12 @@ pub async fn upload(
             }
             (_, Some(name)) => {
                 let data = field.bytes().await?;
-                state.storage_service.save_file(&user.username, &parent, &name, data).await?;
+                match state.storage_service.save_file(&user.username, &parent, &name, data).await {
+                    Ok(_) => {},
+                    Err(e) => {
+                        return Err(e.into());
+                    }
+                }
             }
             _ => {
                 let _ = field.bytes().await?;

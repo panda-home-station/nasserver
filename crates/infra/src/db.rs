@@ -27,7 +27,7 @@ pub async fn init_db(db_url: &str) -> DbPools {
     let sys_pool = create_pool(db_url, "role_sys", "sys, public").await;
     
     // storage 专用连接池 (使用 role_storage)
-    let storage_pool = create_pool(db_url, "role_storage", "storage, public").await;
+    let storage_pool = create_pool(db_url, "role_storage", "storage, sys, public").await;
 
     // 4. 如果存在旧的 SQLite 数据库，执行数据迁移
     crate::data_migration::migrate_from_sqlite_if_needed(&sys_pool).await;
@@ -125,11 +125,13 @@ async fn prepare_database(db_url: &str) {
         }
     };
 
-    println!("Setting up base permissions for role_sys on {}...", target_db);
+    println!("Setting up base permissions for roles on {}...", target_db);
     let perms = [
         format!(r#"GRANT CONNECT ON DATABASE "{}" TO role_sys"#, target_db),
         format!(r#"GRANT CONNECT ON DATABASE "{}" TO role_storage"#, target_db),
         "GRANT ALL ON SCHEMA public TO role_sys".to_string(),
+        "GRANT USAGE ON SCHEMA sys TO role_storage".to_string(),
+        "GRANT USAGE ON SCHEMA storage TO role_storage".to_string(),
         format!(r#"GRANT CREATE ON DATABASE "{}" TO role_sys"#, target_db),
     ];
     

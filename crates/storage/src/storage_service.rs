@@ -26,11 +26,12 @@ impl StorageServiceImpl {
 
     async fn check_app_access(&self, username: &str, app_name: &str) -> Result<bool> {
         if username == "admin" { return Ok(true); }
-        let count: i64 = sqlx::query_scalar("select count(*) from app_permissions where app_name = $1 and username = $2")
+        let count: i64 = sqlx::query_scalar("select count(*) from sys.app_permissions where app_name = $1 and username = $2")
             .bind(app_name)
             .bind(username)
             .fetch_one(&self.db)
-            .await?;
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
         Ok(count > 0)
     }
 
@@ -43,7 +44,7 @@ impl StorageServiceImpl {
             }
             let app_name = parts[1];
             if !self.check_app_access(username, app_name).await? {
-                return Err(DomainError::Forbidden("Access denied".to_string()));
+                return Err(DomainError::Forbidden(format!("Access denied to app: {}", app_name)));
             }
             let mut p = Path::new(&self.storage_path).join("vol1").join("AppData").join(app_name);
             if parts.len() > 2 {
@@ -52,7 +53,7 @@ impl StorageServiceImpl {
             }
             Ok(p)
         } else if clean_path == "/AppData" {
-             Ok(Path::new(&self.storage_path).join("vol1").join("AppData"))
+            Ok(Path::new(&self.storage_path).join("vol1").join("AppData"))
         } else {
             let rel = if clean_path.starts_with('/') { &clean_path[1..] } else { &clean_path };
             Ok(Path::new(&self.storage_path).join("vol1").join("User").join(username).join(rel))
@@ -101,26 +102,33 @@ impl StorageService for StorageServiceImpl {
             return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
         }
 
-        let offset = query.offset.unwrap_or(0);
-        let limit = query.limit.unwrap_or(100);
+        if !self.check_app_access(username, "file-manager").await? {
+            return Err(DomainError::Forbidden("file-manager".to_string()));
+        }
 
-        let user_id: uuid::Uuid = sqlx::query_scalar("select id from users where username = $1")
+        let limit = query.limit.unwrap_or(200) as i64;
+        let offset = query.offset.unwrap_or(0) as i64;
+
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
             .bind(username)
             .fetch_one(&self.db)
-            .await?;
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
 
-        let rows = sqlx::query("select id, name, size, mime, updated_at, storage from cloud_files where user_id = $1 and dir = $2 order by name limit $3 offset $4")
+        let rows = sqlx::query("select id, name, size, mime, updated_at, storage from storage.cloud_files where user_id = $1 and dir = $2 order by name limit $3 offset $4")
             .bind(user_id)
             .bind(&dir)
-            .bind(limit as i64)
-            .bind(offset as i64)
+            .bind(limit)
+            .bind(offset)
             .fetch_all(&self.db)
-            .await?;
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
 
         let mut entries = Vec::new();
         for row in rows {
+            let id: uuid::Uuid = row.get("id");
             entries.push(DocsEntry {
-                id: row.get("id"),
+                id: id.to_string(),
                 name: row.get("name"),
                 is_dir: row.get::<String, _>("mime") == "inode/directory",
                 size: row.get("size"),
@@ -129,11 +137,12 @@ impl StorageService for StorageServiceImpl {
             });
         }
 
-        let total: i64 = sqlx::query_scalar("select count(*) from cloud_files where user_id = $1 and dir = $2")
+        let total: i64 = sqlx::query_scalar("select count(*) from storage.cloud_files where user_id = $1 and dir = $2")
             .bind(user_id)
             .bind(&dir)
             .fetch_one(&self.db)
-            .await?;
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
 
         Ok(DocsListResp {
             path: dir,
@@ -151,16 +160,17 @@ impl StorageService for StorageServiceImpl {
 
         let physical_path = self.resolve_physical_path(username, &full_path).await?;
 
-        fs::create_dir_all(&physical_path).await?;
+        fs::create_dir_all(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
 
         if !full_path.starts_with("/AppData") {
-            let user_id: uuid::Uuid = sqlx::query_scalar("select id from users where username = $1")
+            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
                 .fetch_one(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
 
-            sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-                .bind(uuid::Uuid::new_v4().to_string())
+            sqlx::query("insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(uuid::Uuid::new_v4())
                 .bind(user_id)
                 .bind(name)
                 .bind(parent)
@@ -168,7 +178,8 @@ impl StorageService for StorageServiceImpl {
                 .bind("inode/directory")
                 .bind("local")
                 .execute(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
         }
 
         Ok(())
@@ -194,24 +205,26 @@ impl StorageService for StorageServiceImpl {
         let new_physical = self.resolve_physical_path(username, &to_path).await?;
 
         if let Some(parent) = new_physical.parent() {
-            fs::create_dir_all(parent).await?;
+            fs::create_dir_all(parent).await.map_err(|e| DomainError::Io(e.to_string()))?;
         }
-        fs::rename(old_physical, new_physical).await?;
+        fs::rename(old_physical, new_physical).await.map_err(|e| DomainError::Io(e.to_string()))?;
 
         if !from_path.starts_with("/AppData") {
-            let user_id: uuid::Uuid = sqlx::query_scalar("select id from users where username = $1")
+            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
                 .fetch_one(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
 
-            sqlx::query("update cloud_files set name = $1, dir = $2 where user_id = $3 and dir = $4 and name = $5")
+            sqlx::query("update storage.cloud_files set name = $1, dir = $2 where user_id = $3 and dir = $4 and name = $5")
                 .bind(to_name)
                 .bind(to_parent)
                 .bind(user_id)
                 .bind(from_parent)
                 .bind(from_name)
                 .execute(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
         }
 
         Ok(())
@@ -225,25 +238,27 @@ impl StorageService for StorageServiceImpl {
 
         let physical_path = self.resolve_physical_path(username, &full_path).await?;
 
-        let attr = fs::metadata(&physical_path).await?;
+        let attr = fs::metadata(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
         if attr.is_dir() {
-            fs::remove_dir_all(physical_path).await?;
+            fs::remove_dir_all(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else {
-            fs::remove_file(physical_path).await?;
+            fs::remove_file(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
         }
 
         if !full_path.starts_with("/AppData") {
-            let user_id: uuid::Uuid = sqlx::query_scalar("select id from users where username = $1")
+            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
                 .fetch_one(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
 
-            sqlx::query("delete from cloud_files where user_id = $1 and dir = $2 and name = $3")
+            sqlx::query("delete from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
                 .bind(user_id)
                 .bind(parent)
                 .bind(name)
                 .execute(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
         }
 
         Ok(())
@@ -258,23 +273,34 @@ impl StorageService for StorageServiceImpl {
         let physical_path = physical_parent.join(name);
         
         if let Some(parent) = physical_path.parent() {
-            fs::create_dir_all(parent).await?;
+            if let Err(e) = fs::create_dir_all(parent).await {
+                return Err(DomainError::Io(e.to_string()));
+            }
         }
         
-        fs::write(&physical_path, data).await?;
+        if let Err(e) = fs::write(&physical_path, data).await {
+            return Err(DomainError::Io(e.to_string()));
+        }
+        
+        let normalized_parent = self.normalize_path(parent_virtual_path);
         
         // If not AppData, sync to DB
-        if !parent_virtual_path.starts_with("/AppData") {
-            let user_id: uuid::Uuid = sqlx::query_scalar("select id from users where username = $1")
+        if !normalized_parent.starts_with("/AppData") {
+            let user_id: uuid::Uuid = match sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
                 .fetch_one(&self.db)
-                .await?;
+                .await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return Err(DomainError::Database(e.to_string()));
+                    }
+                };
                 
             let size = physical_path.metadata().map(|m| m.len() as i64).unwrap_or(0);
             let mime = mime_guess::from_path(&physical_path).first_or_octet_stream().to_string();
 
-            sqlx::query(
-                "insert into cloud_files (id, user_id, name, dir, size, mime, storage) 
+            if let Err(e) = sqlx::query(
+                "insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage) 
                  values ($1, $2, $3, $4, $5, $6, 'local') 
                  on conflict (user_id, dir, name) 
                  do update set size = EXCLUDED.size, mime = EXCLUDED.mime, updated_at = CURRENT_TIMESTAMP"
@@ -282,11 +308,13 @@ impl StorageService for StorageServiceImpl {
             .bind(uuid::Uuid::new_v4())
             .bind(user_id)
             .bind(name)
-            .bind(parent_virtual_path)
+            .bind(&normalized_parent)
             .bind(size)
             .bind(mime)
             .execute(&self.db)
-            .await?;
+            .await {
+                return Err(DomainError::Database(e.to_string()));
+            }
         }
         
         Ok(())
@@ -295,38 +323,41 @@ impl StorageService for StorageServiceImpl {
     async fn run_trash_purger(&self) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(24 * 3600)).await;
-            let rows = sqlx::query("select id from cloud_files where dir like '/Trash%' and updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'")
+            let rows = sqlx::query("select id from storage.cloud_files where dir like '/Trash%' and updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'")
                 .fetch_all(&self.db)
                 .await
                 .unwrap_or_default();
             for row in rows {
-                let id: String = row.try_get("id").unwrap_or_default();
-                let _ = sqlx::query("delete from cloud_files where id = $1").bind(&id).execute(&self.db).await;
+                if let Ok(id) = row.try_get::<uuid::Uuid, _>("id") {
+                    let _ = sqlx::query("delete from storage.cloud_files where id = $1").bind(id).execute(&self.db).await;
+                }
             }
         }
     }
 
     async fn sync_external_change(&self, physical_path: &Path) -> Result<()> {
         if let Some(info) = self.parse_physical_path(physical_path).await? {
-            let exists: bool = sqlx::query_scalar("select count(*) > 0 from cloud_files where user_id = $1 and dir = $2 and name = $3")
+            let exists: bool = sqlx::query_scalar("select count(*) > 0 from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
                 .bind(info.user_id)
                 .bind(&info.parent_dir)
                 .bind(&info.name)
                 .fetch_one(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
 
             if exists {
-                sqlx::query("update cloud_files set size = $1, mime = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
+                sqlx::query("update storage.cloud_files set size = $1, mime = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
                     .bind(info.size)
                     .bind(&info.mime)
                     .bind(info.user_id)
                     .bind(&info.parent_dir)
                     .bind(&info.name)
                     .execute(&self.db)
-                    .await?;
+                    .await
+                    .map_err(|e| DomainError::Database(e.to_string()))?;
             } else {
-                sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-                    .bind(uuid::Uuid::new_v4().to_string())
+                sqlx::query("insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                    .bind(uuid::Uuid::new_v4())
                     .bind(info.user_id)
                     .bind(&info.name)
                     .bind(&info.parent_dir)
@@ -334,7 +365,8 @@ impl StorageService for StorageServiceImpl {
                     .bind(&info.mime)
                     .bind(&info.storage_type)
                     .execute(&self.db)
-                    .await?;
+                    .await
+                    .map_err(|e| DomainError::Database(e.to_string()))?;
             }
         }
         Ok(())
@@ -342,12 +374,13 @@ impl StorageService for StorageServiceImpl {
 
     async fn remove_external_change(&self, physical_path: &Path) -> Result<()> {
         if let Some(info) = self.parse_physical_path(physical_path).await? {
-            sqlx::query("delete from cloud_files where user_id = $1 and dir = $2 and name = $3")
+            sqlx::query("delete from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
                 .bind(info.user_id)
                 .bind(&info.parent_dir)
                 .bind(&info.name)
                 .execute(&self.db)
-                .await?;
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
         }
         Ok(())
     }
@@ -358,14 +391,15 @@ impl StorageService for StorageServiceImpl {
 
         match (from_info, to_info) {
             (Some(f), Some(t)) if f.user_id == t.user_id => {
-                let res = sqlx::query("update cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
+                let res = sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
                     .bind(&t.parent_dir)
                     .bind(&t.name)
                     .bind(f.user_id)
                     .bind(&f.parent_dir)
                     .bind(&f.name)
                     .execute(&self.db)
-                    .await?;
+                    .await
+                    .map_err(|e| DomainError::Database(e.to_string()))?;
 
                 if res.rows_affected() == 0 {
                     self.sync_external_change(to).await?;
@@ -408,10 +442,11 @@ impl StorageServiceImpl {
         let virtual_parts = if parts.len() > 1 { &parts[1..] } else { &[] };
         let virtual_path = format!("/{}", virtual_parts.join("/"));
 
-        let user_id: Option<uuid::Uuid> = sqlx::query_scalar("select id from users where username = $1")
+        let user_id: Option<uuid::Uuid> = sqlx::query_scalar("select id from sys.users where username = $1")
             .bind(username)
             .fetch_optional(&self.db)
-            .await?;
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
 
         let user_id = match user_id {
             Some(id) => id,
