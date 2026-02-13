@@ -18,10 +18,17 @@ pub struct PhysicalDisk {
 }
 
 #[derive(Serialize, Clone, Debug)]
+pub struct MemorySlot {
+    pub size: String,
+    pub memory_type: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct HardwareInfo {
     pub cpu: String,
     pub gpu: String,
     pub memory: String,
+    pub memory_slots: Vec<MemorySlot>,
     pub temperature: String,
 }
 
