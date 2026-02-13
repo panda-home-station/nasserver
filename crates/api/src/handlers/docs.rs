@@ -75,13 +75,30 @@ pub async fn upload(
     Query(q): Query<DocsListQuery>,
     mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let parent = q.path.as_deref().unwrap_or("/");
+    let mut parent = q.path.clone().unwrap_or_else(|| "/".to_string());
 
     while let Some(field) = multipart.next_field().await? {
-        let name = field.file_name().unwrap_or("unnamed").to_string();
-        let data = field.bytes().await?;
-        
-        state.storage_service.save_file(&user.username, parent, &name, data).await?;
+        let field_name = field.name().map(|n| n.to_string());
+        let file_name = field.file_name().map(|n| n.to_string());
+
+        match (field_name.as_deref(), file_name) {
+            (Some("path"), None) => {
+                let data = field.bytes().await?;
+                if let Ok(p) = String::from_utf8(data.to_vec()) {
+                    parent = p;
+                }
+            }
+            (Some("size"), None) => {
+                let _ = field.bytes().await?;
+            }
+            (_, Some(name)) => {
+                let data = field.bytes().await?;
+                state.storage_service.save_file(&user.username, &parent, &name, data).await?;
+            }
+            _ => {
+                let _ = field.bytes().await?;
+            }
+        }
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
