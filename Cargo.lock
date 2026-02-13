@@ -545,6 +545,7 @@ dependencies = [
  "bollard",
  "domain",
  "futures-util",
+ "gpu",
  "libc",
  "serde",
  "tokio",

@@ -1,6 +1,6 @@
 use bollard::Docker;
 use bollard::container::{Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions};
-use bollard::models::{HostConfig, PortBinding};
+use bollard::models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
 use bollard::volume::ListVolumesOptions;
 use bollard::network::ListNetworksOptions;
 use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
@@ -392,10 +392,37 @@ impl ContainerService for ContainerServiceImpl {
             host_config.network_mode = Some(network_mode.clone());
         }
 
+        let mut env = req.env.clone().unwrap_or_default();
+
+        if let Some(gpu_id) = &req.gpu_id {
+            if !gpu_id.is_empty() {
+                let gpu_config = gpu::resolve_gpu_config(gpu_id);
+                if !gpu_config.device_requests.is_empty() {
+                    host_config.device_requests = Some(gpu_config.device_requests);
+                }
+                if !gpu_config.devices.is_empty() {
+                    host_config.devices = Some(gpu_config.devices);
+                }
+                if !gpu_config.security_opts.is_empty() {
+                    host_config.security_opt = Some(gpu_config.security_opts);
+                }
+                if !gpu_config.env.is_empty() {
+                    env.extend(gpu_config.env);
+                }
+            }
+        }
+
+        if req.auto_start.unwrap_or(false) {
+            host_config.restart_policy = Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::ALWAYS),
+                maximum_retry_count: None,
+            });
+        }
+
         let config = Config {
             image: Some(req.image_id),
             host_config: Some(host_config),
-            env: req.env,
+            env: Some(env),
             cmd: req.cmd,
             ..Default::default()
         };
