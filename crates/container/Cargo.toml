@@ -10,3 +10,4 @@ bollard = { workspace = true }
 domain = { workspace = true }
 async-trait = { workspace = true }
 libc = { workspace = true }
+futures-util = { workspace = true }

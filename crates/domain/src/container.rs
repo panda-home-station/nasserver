@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use crate::Result;
 pub use crate::entities::container::{ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig};
-pub use crate::dtos::container::IdReq;
+pub use crate::dtos::container::{IdReq, CreateContainerReq, PullImageReq};
 pub use crate::entities::app::{App, AppStatus, AppType};
 
 #[async_trait]
@@ -11,9 +11,11 @@ pub trait ContainerService: Send + Sync {
     async fn stop_container(&self, id: &str) -> Result<()>;
     async fn restart_container(&self, id: &str) -> Result<()>;
     async fn remove_container(&self, id: &str) -> Result<()>;
+    async fn create_container(&self, req: CreateContainerReq) -> Result<()>;
     
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
     async fn remove_image(&self, id: &str) -> Result<()>;
+    async fn pull_image(&self, req: PullImageReq) -> Result<()>;
     
     async fn list_volumes(&self) -> Result<Vec<VolumeInfo>>;
     async fn list_networks(&self) -> Result<Vec<NetworkInfo>>;

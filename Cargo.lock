@@ -544,6 +544,7 @@ dependencies = [
  "async-trait",
  "bollard",
  "domain",
+ "futures-util",
  "libc",
  "serde",
  "tokio",

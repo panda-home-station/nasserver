@@ -39,7 +39,7 @@ pub async fn init() -> AppState {
     let auth_service = Arc::new(AuthServiceImpl::new(pool.clone(), jwt_secret.clone(), storage_path.clone()));
     let system_service = Arc::new(SystemServiceImpl::new(pool.clone(), *START_TIME));
     let storage_service = Arc::new(StorageServiceImpl::new(pool.clone(), storage_path.clone()));
-    let container_service = Arc::new(ContainerServiceImpl::new());
+    let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
     let agent_service = Arc::new(AgentServiceImpl::new());
     let task_service = Arc::new(TaskServiceImpl::new(pool.clone()));
 

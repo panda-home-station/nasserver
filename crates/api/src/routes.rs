@@ -45,8 +45,8 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/podman/container/stop", post(docker::stop_container))
         .route("/api/podman/container/restart", post(docker::restart_container))
         .route("/api/podman/container/remove", post(docker::remove_container))
-        // .route("/api/podman/container/create", post(docker::create_container))
-        // .route("/api/podman/image/pull", post(docker::pull_image))
+        .route("/api/podman/container/create", post(docker::create_container))
+        .route("/api/podman/image/pull", post(docker::pull_image))
         .route("/api/podman/image/remove", post(docker::remove_image))
         // Registry
         .route("/api/podman/registry/search", get(crate::handlers::docker_registry::search))

@@ -1,22 +1,122 @@
 use bollard::Docker;
-use bollard::container::{ListContainersOptions, StartContainerOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions};
+use bollard::container::{Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions};
+use bollard::models::{HostConfig, PortBinding};
 use bollard::volume::ListVolumesOptions;
 use bollard::network::ListNetworksOptions;
-use bollard::image::{ListImagesOptions, RemoveImageOptions};
+use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use domain::{Result, Error, container::{
-    ContainerService, ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig
+    ContainerService, ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig,
+    CreateContainerReq, PullImageReq
 }};
 // Remove models import
 
 pub struct ContainerServiceImpl {
     docker: Docker,
+    storage_path: String,
 }
 
 impl ContainerServiceImpl {
-    pub fn new() -> Self {
+    pub fn new(storage_path: String) -> Self {
         let docker = Self::docker_client();
-        Self { docker }
+        Self { docker, storage_path }
+    }
+
+    fn normalize_path(&self, p: &str) -> String {
+        let s = p.replace("\\", "/");
+        let parts: Vec<&str> = s.split('/')
+            .filter(|x| !x.is_empty() && *x != "." && *x != "..")
+            .collect();
+        format!("/{}", parts.join("/"))
+    }
+
+    fn is_safe_name(&self, name: &str) -> bool {
+        if name.is_empty() || name.len() > 128 {
+            return false;
+        }
+        name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    }
+
+    fn validate_create_req(&self, req: &CreateContainerReq) -> Result<()> {
+        if let Some(name) = &req.name {
+            if !self.is_safe_name(name) {
+                return Err(Error::BadRequest(format!("Invalid container name: {}", name)));
+            }
+        }
+
+        if req.image_id.is_empty() {
+            return Err(Error::BadRequest("Image ID is required".to_string()));
+        }
+
+        if let Some(ports) = &req.ports {
+            for p in ports {
+                if p.host.parse::<u16>().is_err() || p.container.parse::<u16>().is_err() {
+                    return Err(Error::BadRequest(format!("Invalid port mapping: {}:{}", p.host, p.container)));
+                }
+            }
+        }
+
+        if let Some(cpu) = req.cpu_limit {
+            if cpu < 0.0 || cpu > 1024.0 { // Arbitrary limit
+                return Err(Error::BadRequest("CPU limit must be between 0 and 1024".to_string()));
+            }
+        }
+
+        if let Some(mem) = req.memory_limit {
+            if mem < 0.0 || mem > 1024.0 * 1024.0 * 1024.0 * 128.0 { // 128GB limit
+                return Err(Error::BadRequest("Memory limit is too high".to_string()));
+            }
+        }
+
+        if let Some(env) = &req.env {
+            if env.len() > 100 {
+                return Err(Error::BadRequest("Too many environment variables".to_string()));
+            }
+            for e in env {
+                if e.len() > 4096 {
+                    return Err(Error::BadRequest("Environment variable too long".to_string()));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_physical_path(&self, username: Option<&str>, virtual_path: &str) -> Result<std::path::PathBuf> {
+        let clean_path = self.normalize_path(virtual_path);
+        let storage_root = std::path::Path::new(&self.storage_path);
+        
+        let p = if clean_path.starts_with("/AppData/") || clean_path == "/AppData" {
+            let parts: Vec<&str> = clean_path.split('/').filter(|x| !x.is_empty()).collect();
+            let mut p = storage_root.join("vol1").join("AppData");
+            if parts.len() > 1 {
+                let rel = parts[1..].join("/");
+                p = p.join(rel);
+            }
+            p
+        } else {
+            let username = username.unwrap_or("admin");
+            let rel = if clean_path.starts_with('/') { &clean_path[1..] } else { &clean_path };
+            storage_root.join("vol1").join("User").join(username).join(rel)
+        };
+
+        // Final security check: ensure the resolved path is within the storage root
+        if !p.starts_with(storage_root) {
+            return Err(Error::Forbidden(format!("Path escape detected: {}", virtual_path)));
+        }
+
+        Ok(p)
+    }
+
+    fn validate_pull_req(&self, req: &PullImageReq) -> Result<()> {
+        if req.image.is_empty() {
+            return Err(Error::BadRequest("Image name is required".to_string()));
+        }
+        if !req.image.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/' || c == ':') {
+            return Err(Error::BadRequest(format!("Invalid image name: {}", req.image)));
+        }
+        Ok(())
     }
 
     fn docker_client() -> Docker {
@@ -230,5 +330,116 @@ impl ContainerService for ContainerServiceImpl {
                 ipam,
             }
         }).collect())
+    }
+
+    async fn create_container(&self, req: CreateContainerReq) -> Result<()> {
+        self.validate_create_req(&req)?;
+
+        let mut host_config = HostConfig::default();
+        
+        if let Some(ports) = &req.ports {
+            let mut port_bindings = std::collections::HashMap::new();
+            for p in ports {
+                let container_port = format!("{}/tcp", p.container);
+                let binding = PortBinding {
+                    host_ip: None,
+                    host_port: Some(p.host.clone()),
+                };
+                port_bindings.insert(container_port, Some(vec![binding]));
+            }
+            host_config.port_bindings = Some(port_bindings);
+        }
+
+        if let Some(volumes) = &req.volumes {
+            let mut resolved_binds = Vec::new();
+            for v in volumes {
+                let parts: Vec<&str> = v.split(':').collect();
+                if parts.len() == 2 {
+                    let virtual_host_path = parts[0];
+                    let container_path = parts[1];
+                    let physical_host_path = self.resolve_physical_path(req.username.as_deref(), virtual_host_path)?;
+                    
+                    // Ensure the physical path exists
+                    if let Err(e) = tokio::fs::create_dir_all(&physical_host_path).await {
+                        eprintln!("Failed to create host directory {}: {}", physical_host_path.display(), e);
+                    }
+                    
+                    resolved_binds.push(format!("{}:{}", physical_host_path.display(), container_path));
+                } else {
+                    resolved_binds.push(v.clone());
+                }
+            }
+            host_config.binds = Some(resolved_binds);
+        }
+
+        if let Some(cpu) = req.cpu_limit {
+            host_config.nano_cpus = Some((cpu * 1e9) as i64);
+        }
+
+        if let Some(mem) = req.memory_limit {
+            host_config.memory = Some((mem * 1024.0 * 1024.0 * 1024.0) as i64);
+        }
+
+        if let Some(privileged) = req.privileged {
+            host_config.privileged = Some(privileged);
+        }
+
+        if let Some(cap_add) = &req.cap_add {
+            host_config.cap_add = Some(cap_add.clone());
+        }
+
+        if let Some(network_mode) = &req.network_mode {
+            host_config.network_mode = Some(network_mode.clone());
+        }
+
+        let config = Config {
+            image: Some(req.image_id),
+            host_config: Some(host_config),
+            env: req.env,
+            cmd: req.cmd,
+            ..Default::default()
+        };
+
+        let options = req.name.as_ref().map(|name| CreateContainerOptions {
+            name: name.clone(),
+            ..Default::default()
+        });
+
+        let res = self.docker.create_container(options, config)
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        if req.auto_start.unwrap_or(true) {
+            self.docker.start_container(&res.id, None::<StartContainerOptions<String>>)
+                .await
+                .map_err(|e| Error::Internal(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    async fn pull_image(&self, req: PullImageReq) -> Result<()> {
+        self.validate_pull_req(&req)?;
+        let from_image = if let Some(tag) = &req.tag {
+            if tag.is_empty() {
+                req.image.clone()
+            } else {
+                format!("{}:{}", req.image, tag)
+            }
+        } else {
+            req.image.clone()
+        };
+
+        let options = CreateImageOptions {
+            from_image,
+            ..Default::default()
+        };
+
+        let mut stream = self.docker.create_image(Some(options), None, None);
+        while let Some(res) = stream.next().await {
+            res.map_err(|e| Error::Internal(e.to_string()))?;
+        }
+
+        Ok(())
     }
 }

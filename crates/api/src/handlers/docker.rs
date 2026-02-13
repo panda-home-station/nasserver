@@ -1,10 +1,11 @@
 use axum::{
-    extract::State,
+    extract::{State, Extension},
     response::IntoResponse,
     Json,
 };
 use infra::AppState;
-use domain::container::IdReq;
+use domain::auth::AuthUser;
+use domain::dtos::container::{IdReq, CreateContainerReq, PullImageReq};
 use crate::error::ApiResult;
 
 pub async fn list_gpus(State(st): State<AppState>) -> impl IntoResponse {
@@ -54,5 +55,16 @@ pub async fn remove_container(State(st): State<AppState>, Json(req): Json<IdReq>
 
 pub async fn remove_image(State(st): State<AppState>, Json(req): Json<IdReq>) -> ApiResult<impl IntoResponse> {
     st.container_service.remove_image(&req.id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn create_container(State(st): State<AppState>, Extension(user): Extension<AuthUser>, Json(mut req): Json<CreateContainerReq>) -> ApiResult<impl IntoResponse> {
+    req.username = Some(user.username);
+    st.container_service.create_container(req).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn pull_image(State(st): State<AppState>, Json(req): Json<PullImageReq>) -> ApiResult<impl IntoResponse> {
+    st.container_service.pull_image(req).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
