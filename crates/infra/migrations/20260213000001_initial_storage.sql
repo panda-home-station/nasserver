@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS storage.cloud_files (
     checksum TEXT,
     storage TEXT NOT NULL DEFAULT 'file',
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, dir, name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cloud_files_user_dir ON storage.cloud_files(user_id, dir);

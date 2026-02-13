@@ -273,35 +273,20 @@ impl StorageService for StorageServiceImpl {
             let size = physical_path.metadata().map(|m| m.len() as i64).unwrap_or(0);
             let mime = mime_guess::from_path(&physical_path).first_or_octet_stream().to_string();
 
-            // Use insert or replace or update if exists
-            let exists: bool = sqlx::query_scalar("select count(*) > 0 from cloud_files where user_id = $1 and dir = $2 and name = $3")
-                .bind(user_id)
-                .bind(parent_virtual_path)
-                .bind(name)
-                .fetch_one(&self.db)
-                .await
-                .unwrap_or(false);
-
-            if exists {
-                sqlx::query("update cloud_files set size = $1, mime = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
-                    .bind(size)
-                    .bind(mime)
-                    .bind(user_id)
-                    .bind(parent_virtual_path)
-                    .bind(name)
-                    .execute(&self.db)
-                    .await?;
-            } else {
-                sqlx::query("insert into cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, 'local', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-                    .bind(uuid::Uuid::new_v4().to_string())
-                    .bind(user_id)
-                    .bind(name)
-                    .bind(parent_virtual_path)
-                    .bind(size)
-                    .bind(mime)
-                    .execute(&self.db)
-                    .await?;
-            }
+            sqlx::query(
+                "insert into cloud_files (id, user_id, name, dir, size, mime, storage) 
+                 values ($1, $2, $3, $4, $5, $6, 'local') 
+                 on conflict (user_id, dir, name) 
+                 do update set size = EXCLUDED.size, mime = EXCLUDED.mime, updated_at = CURRENT_TIMESTAMP"
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(user_id)
+            .bind(name)
+            .bind(parent_virtual_path)
+            .bind(size)
+            .bind(mime)
+            .execute(&self.db)
+            .await?;
         }
         
         Ok(())

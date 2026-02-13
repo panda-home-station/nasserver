@@ -709,6 +709,7 @@ async fn ensure_directory_exists_internal(db: &Pool<Postgres>, user_id: &str, vi
 }
 
 async fn download_process_internal(db: Pool<Postgres>, download_tasks: Arc<Mutex<HashMap<String, AbortHandle>>>, id: String, url: String, path: String, user_id: String) {
+    let uid = Uuid::from_str(&id).unwrap_or_default();
     let mut downloaded_offset: u64 = 0;
     if let Ok(metadata) = tokio::fs::metadata(&path).await {
         downloaded_offset = metadata.len();
@@ -720,7 +721,7 @@ async fn download_process_internal(db: Pool<Postgres>, download_tasks: Arc<Mutex
         .unwrap_or_else(|_| reqwest::Client::new());
     
     let _ = sqlx::query("update downloads set status = 'downloading' where id = $1")
-        .bind(&id)
+        .bind(uid)
         .execute(&db)
         .await;
 
@@ -735,7 +736,7 @@ async fn download_process_internal(db: Pool<Postgres>, download_tasks: Arc<Mutex
                 let msg = format!("HTTP error: {}", r.status());
                 let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
                     .bind(msg)
-                    .bind(&id)
+                    .bind(uid)
                     .execute(&db)
                     .await;
                 {
@@ -750,7 +751,7 @@ async fn download_process_internal(db: Pool<Postgres>, download_tasks: Arc<Mutex
             let msg = format!("Request failed: {}", e);
             let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
                 .bind(msg)
-                .bind(&id)
+                .bind(uid)
                 .execute(&db)
                 .await;
             {
@@ -778,47 +779,33 @@ async fn download_process_internal(db: Pool<Postgres>, download_tasks: Arc<Mutex
     let mut last_update = Instant::now();
     let mut last_downloaded = downloaded;
 
-    loop {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                if let Err(e) = file.write_all(&chunk).await {
-                    let msg = format!("Write error: {}", e);
-                    let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
-                        .bind(msg)
-                        .bind(&id)
-                        .execute(&db)
-                        .await;
-                    return;
-                }
-                downloaded += chunk.len() as u64;
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if let Err(e) = file.write_all(&chunk).await {
+            let msg = format!("Write error: {}", e);
+            let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
+                .bind(msg)
+                .bind(&id)
+                .execute(&db)
+                .await;
+            return;
+        }
+        downloaded += chunk.len() as u64;
 
-                if last_update.elapsed().as_secs() >= 1 {
-                    let speed = (downloaded - last_downloaded) as f64 / last_update.elapsed().as_secs_f64();
-                    let progress = if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 };
-                    
-                    let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = CURRENT_TIMESTAMP where id = $5")
-                        .bind(downloaded as i64)
-                        .bind(speed as i64)
-                        .bind(progress)
-                        .bind(total_size as i64)
-                        .bind(&id)
-                        .execute(&db)
-                        .await;
+        if last_update.elapsed().as_secs() >= 1 {
+            let speed = (downloaded - last_downloaded) as f64 / last_update.elapsed().as_secs_f64();
+            let progress = if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 };
+            
+            let _ = sqlx::query("update downloads set downloaded_bytes = $1, speed = $2, progress = $3, total_bytes = $4, updated_at = CURRENT_TIMESTAMP where id = $5")
+                .bind(downloaded as i64)
+                .bind(speed as i64)
+                .bind(progress)
+                .bind(total_size as i64)
+                .bind(&id)
+                .execute(&db)
+                .await;
 
-                    last_update = Instant::now();
-                    last_downloaded = downloaded;
-                }
-            },
-            Ok(None) => break,
-            Err(e) => {
-                let msg = format!("Stream error: {}", e);
-                let _ = sqlx::query("update downloads set status = 'error', error_msg = $1 where id = $2")
-                    .bind(msg)
-                    .bind(&id)
-                    .execute(&db)
-                    .await;
-                return;
-            }
+            last_update = Instant::now();
+            last_downloaded = downloaded;
         }
     }
 

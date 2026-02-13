@@ -10,6 +10,26 @@ use uuid::Uuid;
 use infra::AppState;
 use domain::auth::{Claims, AuthUser};
 
+pub async fn check_setup(State(st): State<AppState>, req: Request, next: Next) -> Result<Response, StatusCode> {
+    let path = req.uri().path();
+    
+    // 允许访问初始化相关的接口
+    if path == "/api/system/init/state" || path == "/api/system/init" || path == "/health" || path == "/version" {
+        return Ok(next.run(req).await);
+    }
+
+    // 检查是否已初始化
+    let initialized = st.system_service.is_initialized().await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    if !initialized {
+        // 如果未初始化，拦截所有其他请求，提示需要初始化
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    Ok(next.run(req).await)
+}
+
 pub async fn require_auth(State(st): State<AppState>, mut req: Request, next: Next) -> Result<Response, StatusCode> {
     let hdr = req
         .headers()

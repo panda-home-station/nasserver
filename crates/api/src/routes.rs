@@ -11,7 +11,7 @@ use axum::extract::DefaultBodyLimit;
 use infra::AppState;
 use crate::handlers::{auth, system, device, docker, docs};
 use crate::api::apps;
-use crate::middleware::require_auth;
+use crate::middleware::{require_auth, check_setup};
 
 pub fn api_app(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -89,9 +89,10 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::auth_login))
         .route("/api/cloud/device/code", post(device::device_code))
         .route("/api/cloud/device/authorize", post(device::device_authorize))
-        .with_state(state)
+        .with_state(state.clone())
         .merge(protected)
         .layer(cors)
+        .layer(axum_middleware::from_fn_with_state(state, check_setup))
         .layer({
             let max_mb = std::env::var("PNAS_MAX_UPLOAD_MB")
                 .ok()

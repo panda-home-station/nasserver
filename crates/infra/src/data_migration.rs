@@ -125,14 +125,14 @@ async fn migrate_table(sl_pool: &SqlitePool, pg_pool: &PgPool, sl_table: &str, p
                     query = query.bind(None::<String>);
                 }
             } else {
-                // Generic binding
-                if let Ok(val) = sl_row.try_get::<String, _>(i) {
-                    query = query.bind(val);
-                } else if let Ok(val) = sl_row.try_get::<i64, _>(i) {
+                // Generic binding: Try numeric types first to avoid string conversion
+                if let Ok(val) = sl_row.try_get::<i64, _>(i) {
                     query = query.bind(val);
                 } else if let Ok(val) = sl_row.try_get::<f64, _>(i) {
                     query = query.bind(val);
                 } else if let Ok(val) = sl_row.try_get::<bool, _>(i) {
+                    query = query.bind(val);
+                } else if let Ok(val) = sl_row.try_get::<String, _>(i) {
                     query = query.bind(val);
                 } else {
                     query = query.bind(None::<String>);

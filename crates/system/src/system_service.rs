@@ -230,6 +230,15 @@ impl SystemService for SystemServiceImpl {
     }
 
     async fn is_initialized(&self) -> Result<bool> {
+        let val: Option<String> = sqlx::query_scalar("select value from system_config where key = 'setup_completed'")
+            .fetch_optional(&self.db)
+            .await?;
+        
+        if let Some(v) = val {
+            return Ok(v == "true");
+        }
+
+        // 兼容旧逻辑：如果没有 setup_completed 键，检查用户表
         let count: i64 = sqlx::query_scalar("select count(*) from users")
             .fetch_one(&self.db)
             .await?;
@@ -248,6 +257,7 @@ impl SystemService for SystemServiceImpl {
             .to_string();
         let uid = Uuid::new_v4();
         
+        // 1. 创建管理员账号
         sqlx::query("insert into users (id, username, password_hash, role) values ($1, $2, $3, 'admin')")
             .bind(uid)
             .bind(&req.username)
@@ -261,12 +271,18 @@ impl SystemService for SystemServiceImpl {
         }
         let device_id = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
+        // 2. 写入系统配置
         sqlx::query("INSERT INTO system_config (key, value) VALUES ('device_name', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
             .bind(&req.device_name)
             .execute(&self.db)
             .await?;
         sqlx::query("INSERT INTO system_config (key, value) VALUES ('device_id', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
             .bind(&device_id)
+            .execute(&self.db)
+            .await?;
+            
+        // 3. 标记初始化完成
+        sqlx::query("INSERT INTO system_config (key, value) VALUES ('setup_completed', 'true') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
             .execute(&self.db)
             .await?;
 

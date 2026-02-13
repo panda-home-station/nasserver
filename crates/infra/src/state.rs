@@ -16,7 +16,8 @@ pub static START_TIME: Lazy<chrono::DateTime<Utc>> = Lazy::new(|| Utc::now());
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Pool<Postgres>,
+    pub db: Pool<Postgres>, // 默认保留 sys 连接池，兼容旧代码
+    pub db_storage: Pool<Postgres>, // 专门给存储相关 Service 使用
     pub jwt_secret: String,
     pub storage_path: String,
     pub app_manager: Arc<dyn AppManager>,

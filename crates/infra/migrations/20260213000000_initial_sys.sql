@@ -12,8 +12,12 @@ CREATE TABLE IF NOT EXISTS sys.users (
 
 CREATE TABLE IF NOT EXISTS sys.system_config (
     key TEXT PRIMARY KEY,
-    value TEXT
+    value TEXT,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 初始化引导状态
+INSERT INTO sys.system_config (key, value) VALUES ('setup_completed', 'false') ON CONFLICT (key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS sys.system_stats (
     id SERIAL PRIMARY KEY,

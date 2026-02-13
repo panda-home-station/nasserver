@@ -23,17 +23,17 @@ pub async fn init() -> AppState {
 
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for PostgreSQL");
 
-    let pool = db::init_db(&db_url).await;
+    let pools = db::init_db(&db_url).await;
     
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
     
     let app_manager = Arc::new(DockerAppManager::new());
-    let auth_service = Arc::new(AuthServiceImpl::new(pool.clone(), jwt_secret.clone(), storage_path.clone()));
-    let system_service = Arc::new(SystemServiceImpl::new(pool.clone(), *START_TIME));
-    let storage_service = Arc::new(StorageServiceImpl::new(pool.clone(), storage_path.clone()));
+    let auth_service = Arc::new(AuthServiceImpl::new(pools.sys.clone(), jwt_secret.clone(), storage_path.clone()));
+    let system_service = Arc::new(SystemServiceImpl::new(pools.sys.clone(), *START_TIME));
+    let storage_service = Arc::new(StorageServiceImpl::new(pools.storage.clone(), storage_path.clone()));
     let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
     let agent_service = Arc::new(AgentServiceImpl::new());
-    let task_service = Arc::new(TaskServiceImpl::new(pool.clone()));
+    let task_service = Arc::new(TaskServiceImpl::new(pools.storage.clone()));
 
     let torrent_dir = format!("{}/torrents", storage_path);
     let _ = std::fs::create_dir_all(&torrent_dir);
@@ -42,13 +42,14 @@ pub async fn init() -> AppState {
     let session = librqbit::Session::new_with_opts(torrent_dir.into(), session_opts).await.expect("Failed to init torrent session");
 
     let downloader_service = Arc::new(DownloaderServiceImpl::new(
-        pool.clone(),
+        pools.storage.clone(),
         storage_path.clone(),
         session.clone(),
     ));
 
     AppState {
-        db: pool,
+        db: pools.sys,
+        db_storage: pools.storage,
         jwt_secret,
         storage_path,
         app_manager,
