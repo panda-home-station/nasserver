@@ -32,7 +32,7 @@ pub async fn init() -> AppState {
     let system_service = Arc::new(SystemServiceImpl::new(pools.sys.clone(), *START_TIME));
     let storage_service = Arc::new(StorageServiceImpl::new(pools.storage.clone(), storage_path.clone()));
     let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
-    let agent_service = Arc::new(AgentServiceImpl::new());
+    let agent_service = Arc::new(AgentServiceImpl::new(pools.sys.clone()));
     let task_service = Arc::new(TaskServiceImpl::new(pools.storage.clone()));
 
     let torrent_dir = format!("{}/torrents", storage_path);

@@ -17,3 +17,26 @@ pub struct AgentTask {
     pub plan: Vec<TaskStep>,
     pub logs: Vec<String>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct ChatSession {
+    pub id: uuid::Uuid,
+    pub user_id: uuid::Uuid,
+    pub agent_id: String,
+    pub title: String,
+    pub last_message: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct ChatMessage {
+    pub id: uuid::Uuid,
+    pub session_id: uuid::Uuid,
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Option<serde_json::Value>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}

@@ -32,7 +32,7 @@ tower-http = { version = "0.6", features = ["cors", "fs"] }
 once_cell = "1.19"
 fastrand = "2.0"
 jsonwebtoken = "9"
-sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "sqlite", "macros", "uuid", "chrono"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "sqlite", "macros", "uuid", "chrono", "json"] }
 dotenvy = "0.15"
 argon2 = "0.5"
 password-hash = "0.5"

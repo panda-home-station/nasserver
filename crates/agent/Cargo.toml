@@ -9,7 +9,9 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+urlencoding = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
-domain = { workspace = true }
+domain = { workspace = true, features = ["sqlx"] }
+sqlx = { workspace = true }

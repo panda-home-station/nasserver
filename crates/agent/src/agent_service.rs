@@ -1,4 +1,4 @@
-use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep}};
+use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep, ChatSession, ChatMessageEntity}};
 use async_trait::async_trait;
 use axum::response::sse::Event;
 use futures_util::stream::{BoxStream, StreamExt};
@@ -7,17 +7,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
+use crate::search::SearchService;
+
+use sqlx::{Pool, Postgres};
 
 pub struct AgentServiceImpl {
     tasks: Arc<Mutex<HashMap<String, AgentTask>>>,
     client: Client,
+    search_service: SearchService,
+    db: Pool<Postgres>,
 }
 
 impl AgentServiceImpl {
-    pub fn new() -> Self {
+    pub fn new(db: Pool<Postgres>) -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             client: Client::new(),
+            search_service: SearchService::new(),
+            db,
         }
     }
 }
@@ -173,5 +180,129 @@ impl AgentService for AgentServiceImpl {
         .boxed();
 
         Ok(stream)
+    }
+
+    async fn search(&self, query: &str) -> Result<serde_json::Value> {
+        let results = self.search_service.search(query).await?;
+        Ok(serde_json::to_value(results).unwrap_or(serde_json::json!([])))
+    }
+
+    async fn list_sessions(&self, user_id: Uuid) -> Result<Vec<ChatSession>> {
+        let sessions = sqlx::query_as::<_, ChatSession>(
+            r#"
+            SELECT 
+                s.id, 
+                s.user_id, 
+                s.agent_id, 
+                s.title, 
+                s.created_at, 
+                s.updated_at,
+                (SELECT content FROM agent.chat_messages WHERE session_id = s.id ORDER BY created_at DESC LIMIT 1)::TEXT as last_message
+            FROM agent.chat_sessions s
+            WHERE s.user_id = $1
+            ORDER BY s.updated_at DESC
+            "#
+        )
+        .bind(user_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| {
+            eprintln!("list_sessions error: {}", e);
+            Error::Internal(e.to_string())
+        })?;
+
+        Ok(sessions)
+    }
+
+    async fn get_session_messages(&self, session_id: Uuid) -> Result<Vec<ChatMessageEntity>> {
+        let messages = sqlx::query_as::<_, ChatMessageEntity>(
+            r#"
+            SELECT id, session_id, role, content, tool_calls, created_at
+            FROM agent.chat_messages
+            WHERE session_id = $1
+            ORDER BY created_at ASC
+            "#
+        )
+        .bind(session_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| {
+            eprintln!("get_session_messages error: {}", e);
+            Error::Internal(e.to_string())
+        })?;
+
+        Ok(messages)
+    }
+
+    async fn create_session(&self, user_id: Uuid, agent_id: String, title: String) -> Result<ChatSession> {
+        let id = Uuid::new_v4();
+        let session = sqlx::query_as::<_, ChatSession>(
+            r#"
+            INSERT INTO agent.chat_sessions (id, user_id, agent_id, title)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, user_id, agent_id, title, NULL::TEXT as last_message, created_at, updated_at
+            "#
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(agent_id)
+        .bind(title)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| {
+            eprintln!("create_session error: {}", e);
+            Error::Internal(e.to_string())
+        })?;
+
+        Ok(session)
+    }
+
+    async fn save_message(&self, session_id: Uuid, role: String, content: String, tool_calls: Option<serde_json::Value>) -> Result<ChatMessageEntity> {
+        let mut tx = self.db.begin().await.map_err(|e| Error::Internal(e.to_string()))?;
+        
+        let message = sqlx::query_as::<_, ChatMessageEntity>(
+            r#"
+            INSERT INTO agent.chat_messages (id, session_id, role, content, tool_calls)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, session_id, role, content, tool_calls, created_at
+            "#
+        )
+        .bind(Uuid::new_v4())
+        .bind(session_id)
+        .bind(role)
+        .bind(content)
+        .bind(tool_calls)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            eprintln!("save_message error: {}", e);
+            Error::Internal(e.to_string())
+        })?;
+
+        // Update session's updated_at
+        sqlx::query("UPDATE agent.chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = $1")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                eprintln!("update session error: {}", e);
+                Error::Internal(e.to_string())
+            })?;
+
+        tx.commit().await.map_err(|e| {
+            eprintln!("commit error: {}", e);
+            Error::Internal(e.to_string())
+        })?;
+
+        Ok(message)
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM agent.chat_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(())
     }
 }
