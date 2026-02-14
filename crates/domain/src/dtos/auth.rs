@@ -22,3 +22,9 @@ pub struct LoginResp {
     pub user_id: String,
     pub token: String,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SecuritySettings {
+    pub idle_timeout: i32,
+    pub idle_action: String,
+}

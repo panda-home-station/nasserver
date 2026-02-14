@@ -7,7 +7,7 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use std::path::Path;
 use crate::AuthService;
-use domain::{Result, Error as DomainError, auth::{SignupReq, SignupResp, LoginReq, LoginResp, Claims}};
+use domain::{Result, Error as DomainError, auth::{SignupReq, SignupResp, LoginReq, LoginResp, Claims, SecuritySettings}};
 // Remove models import
 
 pub struct AuthServiceImpl {
@@ -131,6 +131,40 @@ impl AuthService for AuthServiceImpl {
         let uid = Uuid::parse_str(user_id).map_err(|e| DomainError::BadRequest(format!("Invalid UUID: {}", e)))?;
         sqlx::query("update users set wallpaper = $1 where id = $2")
             .bind(path)
+            .bind(uid)
+            .execute(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+            
+        Ok(())
+    }
+
+    async fn get_security_settings(&self, user_id: &str) -> Result<SecuritySettings> {
+        let uid = Uuid::parse_str(user_id).map_err(|e| DomainError::BadRequest(format!("Invalid UUID: {}", e)))?;
+        let row = sqlx::query_as::<_, (i32, String)>("select idle_timeout, idle_action from users where id = $1")
+            .bind(uid)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+            
+        if let Some((timeout, action)) = row {
+            Ok(SecuritySettings {
+                idle_timeout: timeout,
+                idle_action: action,
+            })
+        } else {
+            Ok(SecuritySettings {
+                idle_timeout: 0,
+                idle_action: "lock".to_string(),
+            })
+        }
+    }
+
+    async fn set_security_settings(&self, user_id: &str, settings: SecuritySettings) -> Result<()> {
+        let uid = Uuid::parse_str(user_id).map_err(|e| DomainError::BadRequest(format!("Invalid UUID: {}", e)))?;
+        sqlx::query("update users set idle_timeout = $1, idle_action = $2 where id = $3")
+            .bind(settings.idle_timeout)
+            .bind(&settings.idle_action)
             .bind(uid)
             .execute(&self.db)
             .await

@@ -35,6 +35,8 @@ pub fn api_app(state: AppState) -> Router {
         // User preferences
         .route("/api/user/wallpaper", get(crate::handlers::user::get_wallpaper))
         .route("/api/user/wallpaper", post(crate::handlers::user::set_wallpaper))
+        .route("/api/user/security", get(crate::handlers::user::get_security_settings))
+        .route("/api/user/security", post(crate::handlers::user::set_security_settings))
         // Podman management (via Docker-compatible client; supports Podman socket)
         .route("/api/podman/containers", get(docker::list_containers))
         .route("/api/podman/images", get(docker::list_images))
