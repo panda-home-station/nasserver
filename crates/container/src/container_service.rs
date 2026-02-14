@@ -12,15 +12,37 @@ use domain::{Result, Error, container::{
 }};
 // Remove models import
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 pub struct ContainerServiceImpl {
     docker: Docker,
     storage_path: String,
+    pulling: Arc<Mutex<HashMap<String, PullStatus>>>,
+}
+
+#[derive(Clone, Default)]
+struct PullStatus {
+    progress: f64,
+    layers: HashMap<String, LayerStatus>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct LayerStatus {
+    current: i64,
+    total: i64,
 }
 
 impl ContainerServiceImpl {
     pub fn new(storage_path: String) -> Self {
         let docker = Self::docker_client();
-        Self { docker, storage_path }
+        Self { 
+            docker, 
+            storage_path,
+            pulling: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     fn normalize_path(&self, p: &str) -> String {
@@ -270,8 +292,29 @@ impl ContainerService for ContainerServiceImpl {
                 exposed_ports,
                 env,
                 volumes,
+                status: Some("ready".to_string()),
+                progress: None,
+                error: None,
             });
         }
+
+        // Add pulling images
+        let pulling = self.pulling.lock().await;
+        for (image, status) in pulling.iter() {
+            items.insert(0, ImageInfo {
+                id: format!("pulling-{}", image),
+                repo_tags: vec![image.clone()],
+                size: 0,
+                created: chrono::Utc::now().timestamp(),
+                exposed_ports: Vec::new(),
+                env: Vec::new(),
+                volumes: Vec::new(),
+                status: Some(if status.error.is_some() { "error".to_string() } else { "pulling".to_string() }),
+                progress: Some(status.progress),
+                error: status.error.clone(),
+            });
+        }
+
         Ok(items)
     }
 
@@ -457,15 +500,60 @@ impl ContainerService for ContainerServiceImpl {
             req.image.clone()
         };
 
-        let options = CreateImageOptions {
-            from_image,
-            ..Default::default()
-        };
+        let docker = self.docker.clone();
+        let pulling = self.pulling.clone();
+        let image_name = from_image.clone();
 
-        let mut stream = self.docker.create_image(Some(options), None, None);
-        while let Some(res) = stream.next().await {
-            res.map_err(|e| Error::Internal(e.to_string()))?;
-        }
+        tokio::spawn(async move {
+            {
+                let mut p = pulling.lock().await;
+                p.insert(image_name.clone(), PullStatus::default());
+            }
+
+            let options = CreateImageOptions {
+                from_image: image_name.clone(),
+                ..Default::default()
+            };
+
+            let mut stream = docker.create_image(Some(options), None, None);
+            let mut success = true;
+            while let Some(res) = stream.next().await {
+                match res {
+                    Ok(info) => {
+                        let mut p = pulling.lock().await;
+                        if let Some(s) = p.get_mut(&image_name) {
+                            if let (Some(id), Some(progress_detail)) = (info.id, info.progress_detail) {
+                                if let (Some(current), Some(total)) = (progress_detail.current, progress_detail.total) {
+                                    if total > 0 {
+                                        s.layers.insert(id, LayerStatus { current, total });
+                                    }
+                                }
+                            }
+                            
+                            // Calculate overall progress
+                            let total_current: i64 = s.layers.values().map(|l| l.current).sum();
+                            let total_max: i64 = s.layers.values().map(|l| l.total).sum();
+                            if total_max > 0 {
+                                s.progress = (total_current as f64 / total_max as f64) * 100.0;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let mut p = pulling.lock().await;
+                        if let Some(s) = p.get_mut(&image_name) {
+                            s.error = Some(e.to_string());
+                        }
+                        success = false;
+                        break;
+                    }
+                }
+            }
+
+            if success {
+                let mut p = pulling.lock().await;
+                p.remove(&image_name);
+            }
+        });
 
         Ok(())
     }

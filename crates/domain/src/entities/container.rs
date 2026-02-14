@@ -20,6 +20,9 @@ pub struct ImageInfo {
     pub exposed_ports: Vec<u16>,
     pub env: Vec<String>,
     pub volumes: Vec<String>,
+    pub status: Option<String>,
+    pub progress: Option<f64>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
