@@ -159,15 +159,24 @@ impl AgentService for AgentServiceImpl {
             return Err(Error::Internal(format!("Ollama error: status={}, body={}", status, body_text)));
         }
 
-        let stream = resp.bytes_stream().map(|result| {
+        let mut buffer = String::new();
+        let stream = resp.bytes_stream().map(move |result| {
             match result {
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
+                    buffer.push_str(&text);
                     let mut events = Vec::new();
-                    for line in text.lines() {
+
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer.drain(..pos + 1).collect::<String>();
+                        let line = line.trim();
+                        if line.is_empty() { continue; }
+
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                             if let Some(content) = v.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
-                                events.push(Ok(Event::default().data(content)));
+                                // 使用 JSON 封装内容，确保换行符等特殊字符不会丢失
+                                let data = serde_json::json!({ "content": content }).to_string();
+                                events.push(Ok(Event::default().data(data)));
                             }
                         }
                     }
