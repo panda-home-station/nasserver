@@ -395,22 +395,50 @@ impl ContainerService for ContainerServiceImpl {
 
         if let Some(volumes) = &req.volumes {
             let mut resolved_binds = Vec::new();
-            for v in volumes {
-                let parts: Vec<&str> = v.split(':').collect();
-                if parts.len() == 2 {
-                    let virtual_host_path = parts[0];
-                    let container_path = parts[1];
-                    let physical_host_path = self.resolve_physical_path(req.username.as_deref(), virtual_host_path)?;
-                    
-                    // Ensure the physical path exists
-                    if let Err(e) = tokio::fs::create_dir_all(&physical_host_path).await {
-                        eprintln!("Failed to create host directory {}: {}", physical_host_path.display(), e);
-                    }
-                    
-                    resolved_binds.push(format!("{}:{}", physical_host_path.display(), container_path));
-                } else {
-                    resolved_binds.push(v.clone());
+            for v_str in volumes {
+                let mut host_part = "";
+                let mut container_part = "";
+                let mut options_part = "";
+
+                let mut parts = v_str.splitn(3, ':');
+                
+                host_part = parts.next().unwrap_or("");
+                if let Some(c) = parts.next() {
+                    container_part = c;
                 }
+                if let Some(o) = parts.next() {
+                    options_part = o;
+                }
+
+                let final_host_path: String;
+                if host_part.starts_with('/') || host_part.starts_with('.') {
+                    let physical_host_path_buf = self.resolve_physical_path(req.username.as_deref(), host_part)?;
+                    final_host_path = physical_host_path_buf.display().to_string();
+                    
+                    if let Err(e) = tokio::fs::create_dir_all(&physical_host_path_buf).await {
+                        eprintln!("Failed to create host directory {}: {}", physical_host_path_buf.display(), e);
+                    }
+                } else {
+                    final_host_path = host_part.to_string();
+                }
+
+                if !options_part.is_empty() {
+                    let valid_options = ["z", "Z", "ro", "rw", "rslave", "rprivate", "rshared", "delegated", "cached", "consistent"];
+                    for opt in options_part.split(',') {
+                        if !valid_options.contains(&opt) {
+                            return Err(Error::BadRequest(format!("Invalid volume option '{}' in volume bind '{}'. Allowed options are: {}", opt, v_str, valid_options.join(", "))));
+                        }
+                    }
+                }
+
+                let mut bind_string = final_host_path;
+                bind_string.push(':');
+                bind_string.push_str(container_part);
+                if !options_part.is_empty() {
+                    bind_string.push(':');
+                    bind_string.push_str(options_part);
+                }
+                resolved_binds.push(bind_string);
             }
             host_config.binds = Some(resolved_binds);
         }
