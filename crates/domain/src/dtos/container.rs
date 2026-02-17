@@ -36,3 +36,15 @@ pub struct PullImageReq {
     pub image: String,
     pub tag: Option<String>,
 }
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct CreateVolumeReq {
+    pub name: String,
+    pub driver: Option<String>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct RemoveVolumeReq {
+    pub name: String,
+}

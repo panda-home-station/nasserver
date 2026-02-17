@@ -41,6 +41,8 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/podman/containers", get(docker::list_containers))
         .route("/api/podman/images", get(docker::list_images))
         .route("/api/podman/volumes", get(docker::list_volumes))
+        .route("/api/podman/volume/create", post(docker::create_volume))
+        .route("/api/podman/volume/remove", post(docker::remove_volume))
         .route("/api/podman/networks", get(docker::list_networks))
         .route("/api/podman/gpus", get(docker::list_gpus))
         .route("/api/podman/container/start", post(docker::start_container))

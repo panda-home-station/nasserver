@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use domain::{Result, Error, container::{
     ContainerService, ContainerInfo, ImageInfo, VolumeInfo, NetworkInfo, NetworkIpam, NetworkIpamConfig,
-    CreateContainerReq, PullImageReq
+    CreateContainerReq, PullImageReq, CreateVolumeReq,
 }};
 // Remove models import
 
@@ -336,6 +336,27 @@ impl ContainerService for ContainerServiceImpl {
             mountpoint: v.mountpoint,
             created_at: v.created_at,
         }).collect())
+    }
+
+    async fn create_volume(&self, req: CreateVolumeReq) -> Result<()> {
+        let opts: bollard::volume::CreateVolumeOptions<String> = bollard::volume::CreateVolumeOptions {
+            name: req.name,
+            driver: req.driver.unwrap_or_else(|| "local".to_string()),
+            driver_opts: HashMap::new(),
+            labels: req.labels.unwrap_or_default(),
+        };
+        
+        self.docker.create_volume(opts)
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_volume(&self, name: &str) -> Result<()> {
+        self.docker.remove_volume(name, None::<bollard::volume::RemoveVolumeOptions>)
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(())
     }
 
     async fn list_networks(&self) -> Result<Vec<NetworkInfo>> {
