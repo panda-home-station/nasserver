@@ -8,8 +8,9 @@ use tokio_util::io::ReaderStream;
 use tokio::fs::{self as tokio_fs};
 use infra::AppState;
 use domain::entities::auth::AuthUser;
-use domain::storage::{DocsListResp, DocsListQuery, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery};
+use domain::storage::{DocsListResp, DocsListQuery, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery, InitiateMultipartReq, UploadPartQuery, CompleteMultipartReq};
 use crate::error::ApiResult;
+use tracing::error;
 
 pub async fn list(
     State(state): State<AppState>,
@@ -26,6 +27,35 @@ pub async fn mkdir(
     Json(req): Json<DocsMkdirReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     state.storage_service.mkdir(&user.username, req).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn initiate_multipart(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<InitiateMultipartReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let upload_id = state.storage_service.initiate_multipart_upload(&user.username, &req.path, &req.name).await?;
+    Ok(Json(serde_json::json!({ "upload_id": upload_id })))
+}
+
+pub async fn upload_part(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(q): Query<UploadPartQuery>,
+    data: bytes::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let etag = state.storage_service.save_file_part(&user.username, &q.upload_id, q.part_number, data).await?;
+    Ok(Json(serde_json::json!({ "etag": etag })))
+}
+
+pub async fn complete_multipart(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<CompleteMultipartReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let parts = req.parts.into_iter().map(|p| (p.part_number, p.etag)).collect();
+    state.storage_service.complete_multipart_upload(&user.username, &req.upload_id, parts).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -96,6 +126,7 @@ pub async fn upload(
                 match state.storage_service.save_file(&user.username, &parent, &name, data).await {
                     Ok(_) => {},
                     Err(e) => {
+                        error!(user = %user.username, path = %parent, filename = %name, "Error processing uploaded file: {:?}", e);
                         return Err(e.into());
                     }
                 }

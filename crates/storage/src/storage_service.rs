@@ -468,6 +468,154 @@ impl StorageService for StorageServiceImpl {
         }
         Ok(())
     }
+
+    async fn initiate_multipart_upload(&self, username: &str, parent_virtual_path: &str, name: &str) -> Result<String> {
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|_| DomainError::NotFound(format!("User {} not found", username)))?;
+
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        let dir = self.normalize_path(parent_virtual_path);
+
+        sqlx::query(
+            "INSERT INTO storage.multipart_uploads (upload_id, user_id, dir, name) VALUES ($1, $2, $3, $4)"
+        )
+        .bind(&upload_id)
+        .bind(user_id)
+        .bind(dir)
+        .bind(name)
+        .execute(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        Ok(upload_id)
+    }
+
+    async fn save_file_part(&self, _username: &str, upload_id: &str, part_number: i32, data: bytes::Bytes) -> Result<String> {
+        // 1. Verify upload_id exists
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM storage.multipart_uploads WHERE upload_id = $1)")
+            .bind(upload_id)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        if !exists {
+            return Err(DomainError::NotFound(format!("Upload with ID {} not found", upload_id)));
+        }
+
+        // 2. Calculate ETag
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let etag = format!("{:x}", hasher.finalize());
+
+        // 3. Save part to temporary location
+        let temp_dir = Path::new(&self.storage_path).join("vol1/tmp/multipart").join(upload_id);
+        fs::create_dir_all(&temp_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        let part_path = temp_dir.join(part_number.to_string());
+        fs::write(&part_path, &data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+
+        // 4. Record part info in the database
+        let size = data.len() as i64;
+        sqlx::query(
+            "INSERT INTO storage.upload_parts (upload_id, part_number, etag, size) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (upload_id, part_number) DO UPDATE SET etag = EXCLUDED.etag, size = EXCLUDED.size"
+        )
+        .bind(upload_id)
+        .bind(part_number)
+        .bind(&etag)
+        .bind(size)
+        .execute(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        Ok(etag)
+    }
+
+    async fn complete_multipart_upload(&self, _username: &str, upload_id: &str, etags: Vec<(i32, String)>) -> Result<()> {
+        // 1. Fetch upload info and parts from DB
+        let upload_info: (uuid::Uuid, String, String) = sqlx::query_as(
+            "SELECT user_id, dir, name FROM storage.multipart_uploads WHERE upload_id = $1"
+        )
+        .bind(upload_id)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|_| DomainError::NotFound(format!("Upload with ID {} not found", upload_id)))?;
+
+        let db_parts: Vec<(i32, String, i64)> = sqlx::query_as(
+            "SELECT part_number, etag, size FROM storage.upload_parts WHERE upload_id = $1 ORDER BY part_number ASC"
+        )
+        .bind(upload_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        // 2. Validate parts
+        if etags.len() != db_parts.len() {
+            return Err(DomainError::BadRequest("Part number mismatch".to_string()));
+        }
+        let mut total_size = 0;
+        let mut combined_hash_data = Vec::new();
+        for (i, (part_number, etag, size)) in db_parts.iter().enumerate() {
+            if etags[i].0 != *part_number || etags[i].1 != *etag {
+                return Err(DomainError::BadRequest(format!("Mismatch on part #{}", part_number)));
+            }
+            total_size += size;
+            combined_hash_data.extend_from_slice(&hex::decode(etag).map_err(|_| DomainError::BadRequest("Invalid ETag format".to_string()))?);
+        }
+
+        // 3. Calculate final blob hash
+        let mut final_hasher = Sha256::new();
+        final_hasher.update(&combined_hash_data);
+        let final_hash = format!("{:x}", final_hasher.finalize());
+
+        // 4. Merge parts into final blob
+        let blob_dir = Path::new(&self.storage_path).join("vol1/blobs").join(&final_hash[0..2]).join(&final_hash[2..4]);
+        fs::create_dir_all(&blob_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        let blob_path = blob_dir.join(&final_hash);
+
+        if fs::metadata(&blob_path).await.is_err() {
+            let temp_dir = Path::new(&self.storage_path).join("vol1/tmp/multipart").join(upload_id);
+            let mut dest_file = fs::File::create(&blob_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            for (part_number, _, _) in &db_parts {
+                let part_path = temp_dir.join(part_number.to_string());
+                let mut part_file = fs::File::open(&part_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                tokio::io::copy(&mut part_file, &mut dest_file).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            }
+        }
+
+        // 5. Update metadata in cloud_files
+        let (user_id, dir, name) = upload_info;
+        let mime = mime_guess::from_path(&name).first_or_octet_stream().to_string();
+        sqlx::query(
+            "INSERT INTO storage.cloud_files (id, user_id, name, dir, size, mime, storage, blob_hash) 
+             VALUES ($1, $2, $3, $4, $5, $6, 'blob', $7) 
+             ON CONFLICT (user_id, dir, name) 
+             DO UPDATE SET size = EXCLUDED.size, mime = EXCLUDED.mime, blob_hash = EXCLUDED.blob_hash, updated_at = CURRENT_TIMESTAMP"
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(user_id)
+        .bind(name)
+        .bind(dir)
+        .bind(total_size)
+        .bind(mime)
+        .bind(&final_hash)
+        .execute(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        // 6. Cleanup
+        sqlx::query("DELETE FROM storage.multipart_uploads WHERE upload_id = $1").bind(upload_id).execute(&self.db).await.ok();
+        let temp_dir = Path::new(&self.storage_path).join("vol1/tmp/multipart").join(upload_id);
+        fs::remove_dir_all(temp_dir).await.ok();
+
+        Ok(())
+    }
+
+    async fn abort_multipart_upload(&self, _username: &str, _upload_id: &str) -> Result<()> {
+        todo!()
+    }
 }
 
 struct ExternalFileInfo {

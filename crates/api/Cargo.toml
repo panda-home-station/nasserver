@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tracing = { workspace = true }
 domain = { workspace = true }
 infra = { workspace = true }
 reqwest = { workspace = true }
@@ -23,3 +24,7 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
+bytes = "1"
+
+[lints]
+workspace = true

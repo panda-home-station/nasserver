@@ -14,3 +14,6 @@ jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
 rand_core = { workspace = true }
 domain = { workspace = true }
+
+[lints]
+workspace = true

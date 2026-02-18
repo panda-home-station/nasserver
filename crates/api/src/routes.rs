@@ -1,6 +1,6 @@
 use axum::{
     middleware as axum_middleware,
-    routing::{delete, get, post, get_service},
+    routing::{delete, get, post, put, get_service},
     Router,
     http::{Method, StatusCode},
 };
@@ -32,6 +32,9 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/docs/rename", post(docs::rename))
         .route("/api/docs/download", get(docs::download))
         .route("/api/docs/upload", post(docs::upload))
+        .route("/api/docs/upload/initiate", post(docs::initiate_multipart))
+        .route("/api/docs/upload/part", put(docs::upload_part))
+        .route("/api/docs/upload/complete", post(docs::complete_multipart))
         // User preferences
         .route("/api/user/wallpaper", get(crate::handlers::user::get_wallpaper))
         .route("/api/user/wallpaper", post(crate::handlers::user::set_wallpaper))

@@ -9,3 +9,6 @@ serde = { workspace = true }
 sqlx = { workspace = true }
 domain = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }
+
+[lints]
+workspace = true

@@ -417,19 +417,10 @@ impl ContainerService for ContainerServiceImpl {
         if let Some(volumes) = &req.volumes {
             let mut resolved_binds = Vec::new();
             for v_str in volumes {
-                let mut host_part = "";
-                let mut container_part = "";
-                let mut options_part = "";
-
                 let mut parts = v_str.splitn(3, ':');
-                
-                host_part = parts.next().unwrap_or("");
-                if let Some(c) = parts.next() {
-                    container_part = c;
-                }
-                if let Some(o) = parts.next() {
-                    options_part = o;
-                }
+                let host_part = parts.next().unwrap_or("");
+                let container_part = parts.next().unwrap_or("");
+                let options_part = parts.next().unwrap_or("");
 
                 let final_host_path: String;
                 if host_part.starts_with('/') || host_part.starts_with('.') {

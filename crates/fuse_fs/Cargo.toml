@@ -13,3 +13,6 @@ storage = { path = "../storage" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 async-trait = "0.1"
 bytes = "1.0"
+
+[lints]
+workspace = true

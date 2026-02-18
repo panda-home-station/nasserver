@@ -18,3 +18,6 @@ sha2 = { workspace = true }
 base64ct = { workspace = true }
 domain = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }
+
+[lints]
+workspace = true

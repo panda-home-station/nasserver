@@ -16,6 +16,9 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.rust]
+warnings = "deny"
+
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
@@ -58,6 +61,8 @@ tokio-stream = "0.1"
 mime_guess = "2.0.5"
 thiserror = "2.0.18"
 async-trait = "0.1.89"
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 auth = { path = "crates/auth" }
 system = { path = "crates/system" }

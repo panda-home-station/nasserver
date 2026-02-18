@@ -1,14 +1,15 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::io::{Seek, Write};
+use std::time::{Instant, SystemTime};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyWrite, Request,
 };
 use libc::{EIO, ENOENT};
-use log::{debug, error};
+use log::{debug, error, info};
 
 use domain::{storage::{DocsEntry, DocsListResp, DocsListQuery}, Result as DomainResult};
 use storage::StorageService;
@@ -21,6 +22,7 @@ pub struct BlobFs<S: StorageService + Send + Sync + 'static> {
     storage: Arc<S>,
     blobs_root: String,
     inode_manager: Arc<std::sync::Mutex<InodeManager>>,
+    write_timestamps: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
 }
 
 impl<S: StorageService + Send + Sync + 'static> BlobFs<S> {
@@ -29,6 +31,7 @@ impl<S: StorageService + Send + Sync + 'static> BlobFs<S> {
             storage,
             blobs_root,
             inode_manager: Arc::new(std::sync::Mutex::new(InodeManager::new())),
+            write_timestamps: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -357,6 +360,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
         };
 
         debug!("create: parent={}, name={}, mode={}", parent, name_str, mode);
+        info!("Starting file upload (create): parent_ino={}, name={}", parent, name_str);
 
         let parent_path = match self.get_path_for_inode(parent) {
             Some(p) => p,
@@ -473,6 +477,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
     }
 
     fn write(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, data: &[u8], _write_flags: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyWrite) {
+        info!("Writing data to file: ino={}, offset={}, data_len={}", ino, offset, data.len());
         debug!("write: ino={}, offset={}, data_len={}", ino, offset, data.len());
 
         if ino == FUSE_ROOT_ID {
@@ -524,6 +529,11 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
                         });
 
                         reply.written(data.len() as u32);
+                        info!("Finished writing chunk to file: ino={}, size={}", ino, data.len());
+                        {
+                            let mut timestamps = self.write_timestamps.lock().unwrap();
+                            timestamps.insert(ino, Instant::now());
+                        }
                     }
                     Err(e) => {
                         error!("Failed to open file {:?}: {}", physical_path, e);
@@ -650,6 +660,30 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
                 reply.error(EIO);
             }
         }
+    }
+
+    fn release(&mut self, _req: &Request, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+        info!("File release/close: ino={}", ino);
+        {
+            let mut timestamps = self.write_timestamps.lock().unwrap();
+            if let Some(last_write_time) = timestamps.remove(&ino) {
+                let finalization_duration = last_write_time.elapsed();
+                info!(
+                    "File finalization took: {:.2}s (from last write to release)",
+                    finalization_duration.as_secs_f64()
+                );
+            }
+        }
+
+        let path = match self.get_path_for_inode(ino) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        info!("File upload completed and closed: path={}", path);
+        reply.ok();
     }
 
     fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {

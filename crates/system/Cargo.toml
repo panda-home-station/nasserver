@@ -20,3 +20,6 @@ rand_core = { workspace = true }
 fastrand = { workspace = true }
 async-trait = { workspace = true }
 ash = { workspace = true }
+
+[lints]
+workspace = true
