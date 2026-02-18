@@ -1,0 +1,15 @@
+[package]
+name = "fuse_fs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fuser = "0.12"
+libc = "0.2"
+log = "0.4"
+env_logger = "0.10"
+domain = { path = "../domain" }
+storage = { path = "../storage" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+async-trait = "0.1"
+bytes = "1.0"

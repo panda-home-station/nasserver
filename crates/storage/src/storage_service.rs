@@ -6,6 +6,8 @@ use domain::{Result, Error as DomainError, storage::{
 use sqlx::{Pool, Postgres, Row};
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use sha2::{Sha256, Digest};
+use std::ffi::OsStr;
 
 pub struct StorageServiceImpl {
     db: Pool<Postgres>,
@@ -265,57 +267,107 @@ impl StorageService for StorageServiceImpl {
     }
 
     async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<PathBuf> {
-        self.resolve_physical_path(username, virtual_path).await
+        let normalized_path = self.normalize_path(virtual_path);
+
+        if normalized_path.starts_with("/AppData") {
+            return self.resolve_physical_path(username, &normalized_path).await;
+        }
+
+        let path = Path::new(&normalized_path);
+        let parent_dir = path.parent().and_then(Path::to_str).unwrap_or("/");
+        let name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
+
+        if name.is_empty() {
+            return Err(DomainError::NotFound("File name is empty.".to_string()));
+        }
+
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|_| DomainError::NotFound(format!("User {} not found", username)))?;
+
+        let blob_hash: Option<String> = sqlx::query_scalar(
+            "SELECT blob_hash FROM storage.cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3 AND blob_hash IS NOT NULL"
+        )
+        .bind(user_id)
+        .bind(parent_dir)
+        .bind(name)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        match blob_hash {
+            Some(hash) => {
+                let blob_path = Path::new(&self.storage_path)
+                    .join("vol1/blobs")
+                    .join(&hash[0..2])
+                    .join(&hash[2..4])
+                    .join(&hash);
+                Ok(blob_path)
+            }
+            None => {
+                // Fallback for files not yet migrated
+                self.resolve_physical_path(username, &normalized_path).await
+            }
+        }
     }
 
     async fn save_file(&self, username: &str, parent_virtual_path: &str, name: &str, data: bytes::Bytes) -> Result<()> {
-        let physical_parent = self.resolve_physical_path(username, parent_virtual_path).await?;
-        let physical_path = physical_parent.join(name);
-        
-        if let Some(parent) = physical_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent).await {
-                return Err(DomainError::Io(e.to_string()));
-            }
-        }
-        
-        if let Err(e) = fs::write(&physical_path, data).await {
-            return Err(DomainError::Io(e.to_string()));
-        }
-        
         let normalized_parent = self.normalize_path(parent_virtual_path);
-        
-        // If not AppData, sync to DB
-        if !normalized_parent.starts_with("/AppData") {
-            let user_id: uuid::Uuid = match sqlx::query_scalar("select id from sys.users where username = $1")
-                .bind(username)
-                .fetch_one(&self.db)
-                .await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        return Err(DomainError::Database(e.to_string()));
-                    }
-                };
-                
-            let size = physical_path.metadata().map(|m| m.len() as i64).unwrap_or(0);
-            let mime = mime_guess::from_path(&physical_path).first_or_octet_stream().to_string();
 
-            if let Err(e) = sqlx::query(
-                "insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage) 
-                 values ($1, $2, $3, $4, $5, $6, 'local') 
-                 on conflict (user_id, dir, name) 
-                 do update set size = EXCLUDED.size, mime = EXCLUDED.mime, updated_at = CURRENT_TIMESTAMP"
-            )
-            .bind(uuid::Uuid::new_v4())
-            .bind(user_id)
-            .bind(name)
-            .bind(&normalized_parent)
-            .bind(size)
-            .bind(mime)
-            .execute(&self.db)
-            .await {
-                return Err(DomainError::Database(e.to_string()));
+        if normalized_parent.starts_with("/AppData") {
+            let physical_parent = self.resolve_physical_path(username, &normalized_parent).await?;
+            let physical_path = physical_parent.join(name);
+            if let Some(parent) = physical_path.parent() {
+                fs::create_dir_all(parent).await.map_err(|e| DomainError::Io(e.to_string()))?;
             }
+            fs::write(&physical_path, &data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            return Ok(());
         }
+
+        // User files are stored in the blob store
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let blob_hash = format!("{:x}", hasher.finalize());
+
+        let blob_dir = Path::new(&self.storage_path)
+            .join("vol1/blobs")
+            .join(&blob_hash[0..2])
+            .join(&blob_hash[2..4]);
+        
+        fs::create_dir_all(&blob_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        let blob_path = blob_dir.join(&blob_hash);
+
+        if fs::metadata(&blob_path).await.is_err() {
+            fs::write(&blob_path, &data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        }
+
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+            
+        let size = data.len() as i64;
+        let mime = mime_guess::from_path(name).first_or_octet_stream().to_string();
+
+        sqlx::query(
+            "insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage, blob_hash) 
+             values ($1, $2, $3, $4, $5, $6, 'blob', $7) 
+             on conflict (user_id, dir, name) 
+             do update set size = EXCLUDED.size, mime = EXCLUDED.mime, blob_hash = EXCLUDED.blob_hash, updated_at = CURRENT_TIMESTAMP"
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(user_id)
+        .bind(name)
+        .bind(&normalized_parent)
+        .bind(size)
+        .bind(mime)
+        .bind(&blob_hash)
+        .execute(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
         
         Ok(())
     }

@@ -8,6 +8,7 @@ use domain::storage::StorageService;
 use domain::container::{ContainerService, AppManager};
 use domain::downloader::DownloaderService;
 use domain::agent::AgentService;
+use domain::blobfs::BlobFsService;
 use domain::task::TaskService;
 use chrono::Utc;
 
@@ -28,4 +29,5 @@ pub struct AppState {
     pub downloader_service: Arc<dyn DownloaderService>,
     pub agent_service: Arc<dyn AgentService>,
     pub task_service: Arc<dyn TaskService>,
+    pub blob_fs_service: Arc<dyn BlobFsService>,
 }

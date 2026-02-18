@@ -23,3 +23,4 @@ container = { workspace = true }
 downloader = { workspace = true }
 task = { workspace = true }
 agent = { workspace = true }
+fuse_fs = { workspace = true }

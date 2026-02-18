@@ -12,6 +12,7 @@ members = [
     "crates/infra",
     "crates/api",
     "crates/domain",
+    "crates/fuse_fs",
 ]
 resolver = "2"
 
@@ -69,3 +70,4 @@ gpu = { path = "crates/gpu" }
 infra = { path = "crates/infra" }
 api = { path = "crates/api" }
 domain = { path = "crates/domain" }
+fuse_fs = { path = "crates/fuse_fs" }

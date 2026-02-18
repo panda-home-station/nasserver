@@ -8,6 +8,7 @@ use system::SystemServiceImpl;
 use storage::StorageServiceImpl;
 use agent::AgentServiceImpl;
 use task::TaskServiceImpl;
+use fuse_fs::BlobFsServiceImpl;
 
 pub async fn init() -> AppState {
     dotenvy::dotenv().ok();
@@ -34,6 +35,7 @@ pub async fn init() -> AppState {
     let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
     let agent_service = Arc::new(AgentServiceImpl::new(pools.sys.clone()));
     let task_service = Arc::new(TaskServiceImpl::new(pools.storage.clone()));
+    let blob_fs_service = Arc::new(BlobFsServiceImpl::new(storage_service.clone()));
 
     let torrent_dir = format!("{}/torrents", storage_path);
     let _ = std::fs::create_dir_all(&torrent_dir);
@@ -60,5 +62,6 @@ pub async fn init() -> AppState {
         downloader_service,
         agent_service,
         task_service,
+        blob_fs_service,
     }
 }
