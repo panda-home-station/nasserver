@@ -226,7 +226,29 @@ impl StorageService for StorageServiceImpl {
                 .execute(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
+
+            let like_pat = format!("{}/%", from_path);
+
+            // Update direct children
+            sqlx::query("update storage.cloud_files set dir = $1 where user_id = $2 and dir = $3")
+                .bind(&to_path)
+                .bind(user_id)
+                .bind(&from_path)
+                .execute(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+
+            // Update grandchildren
+            sqlx::query("update storage.cloud_files set dir = $1 || substring(dir from length($2) + 1) where user_id = $3 and dir like $4")
+                .bind(&to_path)
+                .bind(&from_path)
+                .bind(user_id)
+                .bind(&like_pat)
+                .execute(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
         }
+
 
         Ok(())
     }
