@@ -12,7 +12,6 @@ async fn main() {
     let state = init::init().await;
 
     // 2. Start background tasks
-    infra::watcher::init(state.clone()).await;
 
     let sys_service = state.system_service.clone();
     tokio::spawn(async move {

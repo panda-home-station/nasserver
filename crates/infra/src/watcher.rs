@@ -1,3 +1,6 @@
+// DEPRECATED: 本模块已弃用，不再在服务入口处初始化。保留代码仅用于参考和可能的将来复用。
+// 目前系统已迁移至基于数据库与 blob 的文件管理，不再需要对 $storage/vol1/User 进行扫描与监听。
+
 use crate::state::AppState;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};

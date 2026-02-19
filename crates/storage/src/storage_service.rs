@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use sha2::{Sha256, Digest};
 use std::ffi::OsStr;
+use chrono::Utc;
 
 pub struct StorageServiceImpl {
     db: Pool<Postgres>,
@@ -160,11 +161,10 @@ impl StorageService for StorageServiceImpl {
         let parent = path_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
         let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
-        let physical_path = self.resolve_physical_path(username, &full_path).await?;
-
-        fs::create_dir_all(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-
-        if !full_path.starts_with("/AppData") {
+        if full_path.starts_with("/AppData") {
+            let physical_path = self.resolve_physical_path(username, &full_path).await?;
+            fs::create_dir_all(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        } else {
             let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
                 .fetch_one(&self.db)
@@ -178,7 +178,7 @@ impl StorageService for StorageServiceImpl {
                 .bind(parent)
                 .bind(0i64)
                 .bind("inode/directory")
-                .bind("local")
+                .bind("virtual")
                 .execute(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
@@ -203,15 +203,14 @@ impl StorageService for StorageServiceImpl {
         let to_parent = to_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
         let to_name = to_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid to path".to_string()))?;
 
-        let old_physical = self.resolve_physical_path(username, &from_path).await?;
-        let new_physical = self.resolve_physical_path(username, &to_path).await?;
-
-        if let Some(parent) = new_physical.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        }
-        fs::rename(old_physical, new_physical).await.map_err(|e| DomainError::Io(e.to_string()))?;
-
-        if !from_path.starts_with("/AppData") {
+        if from_path.starts_with("/AppData") || to_path.starts_with("/AppData") {
+            let old_physical = self.resolve_physical_path(username, &from_path).await?;
+            let new_physical = self.resolve_physical_path(username, &to_path).await?;
+            if let Some(parent) = new_physical.parent() {
+                fs::create_dir_all(parent).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            }
+            fs::rename(old_physical, new_physical).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        } else {
             let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
                 .fetch_one(&self.db)
@@ -238,29 +237,157 @@ impl StorageService for StorageServiceImpl {
         let parent = path_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
         let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
-        let physical_path = self.resolve_physical_path(username, &full_path).await?;
-
-        let attr = fs::metadata(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        if attr.is_dir() {
-            fs::remove_dir_all(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        } else {
-            fs::remove_file(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        }
-
-        if !full_path.starts_with("/AppData") {
+        if full_path.starts_with("/AppData") {
+            let physical_path = self.resolve_physical_path(username, &full_path).await?;
+            let attr = fs::metadata(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            if attr.is_dir() {
+                fs::remove_dir_all(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            } else {
+                fs::remove_file(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            }
+        } else if full_path == "/Trash" || full_path.starts_with("/Trash/") {
             let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
 
-            sqlx::query("delete from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
+            let row = sqlx::query("select id, storage, blob_hash, mime from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
                 .bind(user_id)
                 .bind(parent)
                 .bind(name)
-                .execute(&self.db)
+                .fetch_optional(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
+
+            if let Some(row) = row {
+                let id: uuid::Uuid = row.get("id");
+                let storage: String = row.get("storage");
+                let blob_hash: Option<String> = row.try_get("blob_hash").ok();
+                let mime: String = row.get("mime");
+
+                if storage == "blob" {
+                    if let Some(hash) = blob_hash.clone() {
+                        let cnt: i64 = sqlx::query_scalar("select count(*) from storage.cloud_files where blob_hash = $1 and id <> $2 and dir not like '/Trash%'")
+                            .bind(&hash)
+                            .bind(id)
+                            .fetch_one(&self.db)
+                            .await
+                            .unwrap_or(0);
+                        if cnt == 0 {
+                            let blob_path = Path::new(&self.storage_path)
+                                .join("vol1/blobs")
+                                .join(&hash[0..2])
+                                .join(&hash[2..4])
+                                .join(&hash);
+                            let _ = fs::remove_file(blob_path).await;
+                        }
+                    }
+                }
+
+                let _ = sqlx::query("delete from storage.cloud_files where id = $1")
+                    .bind(id)
+                    .execute(&self.db)
+                    .await;
+
+                if mime == "inode/directory" {
+                    let dir_path = format!("{}/{}", parent, name);
+                    let like_pat = format!("{}/%", dir_path);
+                    let rows = sqlx::query("select id, storage, blob_hash from storage.cloud_files where user_id = $1 and (dir = $2 or dir like $3)")
+                        .bind(user_id)
+                        .bind(&dir_path)
+                        .bind(&like_pat)
+                        .fetch_all(&self.db)
+                        .await
+                        .unwrap_or_default();
+                    for r in rows {
+                        let cid: uuid::Uuid = r.get("id");
+                        let cstorage: String = r.get("storage");
+                        let cblob_hash: Option<String> = r.try_get("blob_hash").ok();
+                        if cstorage == "blob" {
+                            if let Some(ch) = cblob_hash {
+                                let cnt: i64 = sqlx::query_scalar("select count(*) from storage.cloud_files where blob_hash = $1 and id <> $2 and dir not like '/Trash%'")
+                                    .bind(&ch)
+                                    .bind(cid)
+                                    .fetch_one(&self.db)
+                                    .await
+                                    .unwrap_or(0);
+                                if cnt == 0 {
+                                    let blob_path = Path::new(&self.storage_path)
+                                        .join("vol1/blobs")
+                                        .join(&ch[0..2])
+                                        .join(&ch[2..4])
+                                        .join(&ch);
+                                    let _ = fs::remove_file(blob_path).await;
+                                }
+                            }
+                        }
+                        let _ = sqlx::query("delete from storage.cloud_files where id = $1")
+                            .bind(cid)
+                            .execute(&self.db)
+                            .await;
+                    }
+                }
+            }
+        } else {
+            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+                .bind(username)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+
+            let mime_opt: Option<String> = sqlx::query_scalar("select mime from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
+                .bind(user_id)
+                .bind(parent)
+                .bind(name)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+
+            let trash_prefix = format!("/Trash/{}", Utc::now().format("%Y%m%d"));
+
+            if let Some(mime) = mime_opt {
+                if mime == "inode/directory" {
+                    let from_dir = full_path.clone();
+                    let like_pat = format!("{}/%", from_dir);
+                    sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and (dir = $3 or dir like $4)")
+                        .bind(&trash_prefix)
+                        .bind(user_id)
+                        .bind(&from_dir)
+                        .bind(&like_pat)
+                        .execute(&self.db)
+                        .await
+                        .map_err(|e| DomainError::Database(e.to_string()))?;
+                    sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and dir = $3 and name = $4")
+                        .bind(&trash_prefix)
+                        .bind(user_id)
+                        .bind(parent)
+                        .bind(name)
+                        .execute(&self.db)
+                        .await
+                        .map_err(|e| DomainError::Database(e.to_string()))?;
+                } else {
+                    sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and dir = $3 and name = $4")
+                        .bind(&trash_prefix)
+                        .bind(user_id)
+                        .bind(parent)
+                        .bind(name)
+                        .execute(&self.db)
+                        .await
+                        .map_err(|e| DomainError::Database(e.to_string()))?;
+                }
+            } else {
+                let from_dir = full_path.clone();
+                let like_pat = format!("{}/%", from_dir);
+                sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and (dir = $3 or dir like $4)")
+                    .bind(&trash_prefix)
+                    .bind(user_id)
+                    .bind(&from_dir)
+                    .bind(&like_pat)
+                    .execute(&self.db)
+                    .await
+                    .map_err(|e| DomainError::Database(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -375,12 +502,33 @@ impl StorageService for StorageServiceImpl {
     async fn run_trash_purger(&self) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(24 * 3600)).await;
-            let rows = sqlx::query("select id from storage.cloud_files where dir like '/Trash%' and updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'")
+            let rows = sqlx::query("select id, storage, blob_hash from storage.cloud_files where dir like '/Trash%' and updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'")
                 .fetch_all(&self.db)
                 .await
                 .unwrap_or_default();
             for row in rows {
-                if let Ok(id) = row.try_get::<uuid::Uuid, _>("id") {
+                let id = row.try_get::<uuid::Uuid, _>("id").ok();
+                let storage: Option<String> = row.try_get("storage").ok();
+                let blob_hash: Option<String> = row.try_get("blob_hash").ok();
+                if let (Some(id), Some(storage)) = (id, storage) {
+                    if storage == "blob" {
+                        if let Some(hash) = blob_hash.clone() {
+                            let cnt: i64 = sqlx::query_scalar("select count(*) from storage.cloud_files where blob_hash = $1 and id <> $2 and dir not like '/Trash%'")
+                                .bind(&hash)
+                                .bind(id)
+                                .fetch_one(&self.db)
+                                .await
+                                .unwrap_or(0);
+                            if cnt == 0 {
+                                let blob_path = Path::new(&self.storage_path)
+                                    .join("vol1/blobs")
+                                    .join(&hash[0..2])
+                                    .join(&hash[2..4])
+                                    .join(&hash);
+                                let _ = fs::remove_file(blob_path).await;
+                            }
+                        }
+                    }
                     let _ = sqlx::query("delete from storage.cloud_files where id = $1").bind(id).execute(&self.db).await;
                 }
             }
