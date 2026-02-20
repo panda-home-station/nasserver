@@ -663,6 +663,67 @@ impl StorageService for StorageServiceImpl {
         Ok(())
     }
 
+    async fn commit_blob_change(&self, username: &str, virtual_path: &str, temp_path: &Path) -> Result<()> {
+        // 1. Calculate SHA256 of temp file
+        let mut file = tokio::fs::File::open(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192];
+        use tokio::io::AsyncReadExt;
+        loop {
+            let n = file.read(&mut buffer).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            if n == 0 { break; }
+            hasher.update(&buffer[..n]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        let size = file.metadata().await.map_err(|e| DomainError::Io(e.to_string()))?.len();
+        
+        // 2. Determine new blob path
+        let prefix1 = &hash[0..2];
+        let prefix2 = &hash[2..4];
+        let blob_dir = Path::new(&self.storage_path).join("vol1/blobs").join(prefix1).join(prefix2);
+        tokio::fs::create_dir_all(&blob_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        let blob_path = blob_dir.join(&hash);
+
+        // 3. Move temp file to blob path (or delete if exists)
+        if blob_path.exists() {
+            tokio::fs::remove_file(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        } else {
+            if let Err(e) = tokio::fs::rename(temp_path, &blob_path).await {
+                let is_cross_device = e.raw_os_error() == Some(18); // EXDEV
+                if is_cross_device {
+                     tokio::fs::copy(temp_path, &blob_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                     tokio::fs::remove_file(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                } else {
+                    return Err(DomainError::Io(e.to_string()));
+                }
+            }
+        }
+
+        // 4. Update DB
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|_| DomainError::NotFound(format!("User {} not found", username)))?;
+
+        let clean_path = self.normalize_path(virtual_path);
+        let name = Path::new(&clean_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent_dir = Path::new(&clean_path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string());
+        let parent_dir = if parent_dir.is_empty() { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
+
+        sqlx::query("update storage.cloud_files set blob_hash = $1, size = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
+            .bind(hash)
+            .bind(size as i64)
+            .bind(user_id)
+            .bind(parent_dir)
+            .bind(name)
+            .execute(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
     async fn initiate_multipart_upload(&self, username: &str, parent_virtual_path: &str, name: &str) -> Result<String> {
         let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
             .bind(username)

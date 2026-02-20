@@ -43,6 +43,7 @@ pub trait StorageService: Send + Sync {
     async fn remove_external_change(&self, physical_path: &Path) -> Result<()>;
     async fn move_external_change(&self, from: &Path, to: &Path) -> Result<()>;
     async fn update_file_metadata(&self, username: &str, virtual_path: &str, size: i64) -> Result<()>;
+    async fn commit_blob_change(&self, username: &str, virtual_path: &str, temp_path: &Path) -> Result<()>;
     async fn run_trash_purger(&self);
 
     async fn initiate_multipart_upload(&self, username: &str, parent_virtual_path: &str, name: &str) -> Result<String>;
