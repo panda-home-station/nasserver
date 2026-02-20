@@ -6,19 +6,22 @@ use password_hash::SaltString;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use std::path::Path;
+use std::sync::Arc;
 use crate::AuthService;
 use domain::{Result, Error as DomainError, auth::{SignupReq, SignupResp, LoginReq, LoginResp, Claims, SecuritySettings}};
+use domain::blobfs::BlobFsService;
 // Remove models import
 
 pub struct AuthServiceImpl {
     db: Pool<Postgres>,
     jwt_secret: String,
     storage_path: String,
+    blob_fs: Arc<dyn BlobFsService + Send + Sync>,
 }
 
 impl AuthServiceImpl {
-    pub fn new(db: Pool<Postgres>, jwt_secret: String, storage_path: String) -> Self {
-        Self { db, jwt_secret, storage_path }
+    pub fn new(db: Pool<Postgres>, jwt_secret: String, storage_path: String, blob_fs: Arc<dyn BlobFsService + Send + Sync>) -> Self {
+        Self { db, jwt_secret, storage_path, blob_fs }
     }
 }
 
@@ -53,6 +56,14 @@ impl AuthService for AuthServiceImpl {
         // create per-user storage root
         let user_root = Path::new(&self.storage_path).join("vol1").join("User").join(&req.username);
         let _ = std::fs::create_dir_all(&user_root);
+        let user_data_root = Path::new(&self.storage_path).join("vol1").join("User_Data").join(&req.username);
+        let _ = std::fs::create_dir_all(&user_data_root);
+
+        // Mount blob storage for the new user
+        if let Err(e) = self.blob_fs.mount_for_user(&req.username).await {
+            log::error!("Failed to mount blob storage for new user {}: {}", req.username, e);
+            // Non-critical failure for signup, but should be logged
+        }
         
         Ok(SignupResp { user_id: uid.to_string() })
     }
@@ -73,6 +84,11 @@ impl AuthService for AuthServiceImpl {
                 .is_ok();
                 
             if ok {
+                // Mount blob storage for the user
+                if let Err(e) = self.blob_fs.mount_for_user(&username).await {
+                    log::warn!("Failed to mount blob storage for user {}: {}", username, e);
+                }
+
                 let exp = (Utc::now() + Duration::days(7)).timestamp() as usize;
                 let claims = Claims {
                     sub: uid.to_string(),

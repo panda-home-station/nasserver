@@ -59,7 +59,7 @@ impl StorageServiceImpl {
             Ok(Path::new(&self.storage_path).join("vol1").join("AppData"))
         } else {
             let rel = if clean_path.starts_with('/') { &clean_path[1..] } else { &clean_path };
-            Ok(Path::new(&self.storage_path).join("vol1").join("User").join(username).join(rel))
+            Ok(Path::new(&self.storage_path).join("vol1").join("User_Data").join(username).join(rel))
         }
     }
 }
@@ -636,6 +636,30 @@ impl StorageService for StorageServiceImpl {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn update_file_metadata(&self, username: &str, virtual_path: &str, size: i64) -> Result<()> {
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|_| DomainError::NotFound(format!("User {} not found", username)))?;
+
+        let clean_path = self.normalize_path(virtual_path);
+        let name = Path::new(&clean_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent_dir = Path::new(&clean_path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string());
+        let parent_dir = if parent_dir.is_empty() { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
+
+        sqlx::query("update storage.cloud_files set size = $1, updated_at = CURRENT_TIMESTAMP where user_id = $2 and dir = $3 and name = $4")
+            .bind(size)
+            .bind(user_id)
+            .bind(parent_dir)
+            .bind(name)
+            .execute(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+
         Ok(())
     }
 

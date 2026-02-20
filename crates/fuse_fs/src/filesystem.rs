@@ -20,15 +20,17 @@ const TTL: &std::time::Duration = &std::time::Duration::from_secs(1);
 
 pub struct BlobFs<S: StorageService + Send + Sync + 'static> {
     storage: Arc<S>,
+    username: String,
     blobs_root: String,
     inode_manager: Arc<std::sync::Mutex<InodeManager>>,
     write_timestamps: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
 }
 
 impl<S: StorageService + Send + Sync + 'static> BlobFs<S> {
-    pub fn new(storage: Arc<S>, blobs_root: String) -> Self {
+    pub fn new(storage: Arc<S>, username: String, blobs_root: String) -> Self {
         Self {
             storage,
+            username,
             blobs_root,
             inode_manager: Arc::new(std::sync::Mutex::new(InodeManager::new())),
             write_timestamps: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -84,6 +86,11 @@ impl<S: StorageService + Send + Sync + 'static> BlobFs<S> {
 }
 
 impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
+    fn init(&mut self, _req: &Request<'_>, _config: &mut fuser::KernelConfig) -> Result<(), libc::c_int> {
+        info!("BlobFs: Initialized");
+        Ok(())
+    }
+
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -93,7 +100,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
             }
         };
 
-        debug!("lookup: parent={}, name={}", parent, name_str);
+        info!("BlobFs: lookup parent={} name={}", parent, name_str);
 
         let parent_path = match self.get_path_for_inode(parent) {
             Some(p) => p,
@@ -120,7 +127,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         let result: DomainResult<DocsEntry> = rt.block_on(async {
             let blobs_parent_path = self.map_to_blobs_path(&parent_path);
-            let list_result = self.storage.list(&self.blobs_root, DocsListQuery {
+            let list_result = self.storage.list(&self.username, DocsListQuery {
                 path: Some(blobs_parent_path),
                 limit: Some(100),
                 offset: Some(0),
@@ -144,7 +151,30 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        debug!("getattr: ino={}", ino);
+        info!("BlobFs: getattr ino={}", ino);
+
+        if ino == FUSE_ROOT_ID {
+            let now = SystemTime::now();
+            let attr = FileAttr {
+                ino: FUSE_ROOT_ID,
+                size: 0,
+                blocks: 0,
+                atime: now,
+                mtime: now,
+                ctime: now,
+                crtime: now,
+                kind: FileType::Directory,
+                perm: 0o755,
+                nlink: 2,
+                uid: 1000,
+                gid: 1000,
+                rdev: 0,
+                flags: 0,
+                blksize: 4096,
+            };
+            reply.attr(&TTL, &attr);
+            return;
+        }
 
         let path = match self.get_path_for_inode(ino) {
             Some(p) => p,
@@ -176,7 +206,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
                 .to_string();
             
             let blobs_parent_path = self.map_to_blobs_path(parent_path);
-            let list_result = self.storage.list(&self.blobs_root, DocsListQuery {
+            let list_result = self.storage.list(&self.username, DocsListQuery {
                 path: Some(blobs_parent_path),
                 limit: Some(100),
                 offset: Some(0),
@@ -227,7 +257,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         let result: DomainResult<DocsListResp> = rt.block_on(async {
             let blobs_path = self.map_to_blobs_path(&path);
-            self.storage.list(&self.blobs_root, DocsListQuery {
+            self.storage.list(&self.username, DocsListQuery {
                 path: Some(blobs_path),
                 limit: None,
                 offset: None,
@@ -315,7 +345,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         let result: DomainResult<()> = rt.block_on(async {
             let blobs_full_path = self.map_to_blobs_path(&full_path);
-            self.storage.mkdir(&self.blobs_root, domain::storage::DocsMkdirReq {
+            self.storage.mkdir(&self.username, domain::storage::DocsMkdirReq {
                 path: blobs_full_path,
             }).await
         });
@@ -388,7 +418,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
         // Create empty file using storage service
         let result: DomainResult<()> = rt.block_on(async {
             let blobs_parent_path = self.map_to_blobs_path(&parent_path);
-            self.storage.save_file(&self.blobs_root, &blobs_parent_path, name_str, bytes::Bytes::new()).await
+            self.storage.save_file(&self.username, &blobs_parent_path, name_str, bytes::Bytes::new()).await
         });
 
         match result {
@@ -448,7 +478,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         let result: DomainResult<PathBuf> = rt.block_on(async {
             let blobs_path = self.map_to_blobs_path(&path);
-            self.storage.get_file_path(&self.blobs_root, &blobs_path).await
+            self.storage.get_file_path(&self.username, &blobs_path).await
         });
 
         match result {
@@ -504,7 +534,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         let result: DomainResult<PathBuf> = rt.block_on(async {
             let blobs_path = self.map_to_blobs_path(&path);
-            self.storage.get_file_path(&self.blobs_root, &blobs_path).await
+            self.storage.get_file_path(&self.username, &blobs_path).await
         });
 
         match result {
@@ -521,10 +551,17 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
                             reply.error(EIO);
                             return;
                         }
+                        
+                        if let Err(e) = file.sync_all() {
+                             error!("Failed to sync file {:?}: {}", physical_path, e);
+                        }
+
+                        let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                        let virtual_path = path.clone();
 
                         rt.block_on(async {
-                            if let Err(e) = self.storage.sync_external_change(&physical_path).await {
-                                error!("Failed to sync external change for {:?}: {:?}", physical_path, e);
+                            if let Err(e) = self.storage.update_file_metadata(&self.username, &virtual_path, file_size as i64).await {
+                                error!("Failed to update metadata for {:?}: {:?}", virtual_path, e);
                             }
                         });
 
@@ -584,7 +621,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         let result: DomainResult<()> = rt.block_on(async {
             let blobs_full_path = self.map_to_blobs_path(&full_path);
-            self.storage.delete(&self.blobs_root, domain::storage::DocsDeleteQuery {
+            self.storage.delete(&self.username, domain::storage::DocsDeleteQuery {
                 path: Some(blobs_full_path),
             }).await
         });
@@ -641,7 +678,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         let result: DomainResult<()> = rt.block_on(async {
             let blobs_full_path = self.map_to_blobs_path(&full_path);
-            self.storage.delete(&self.blobs_root, domain::storage::DocsDeleteQuery {
+            self.storage.delete(&self.username, domain::storage::DocsDeleteQuery {
                 path: Some(blobs_full_path),
             }).await
         });
@@ -744,7 +781,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
         let result: DomainResult<()> = rt.block_on(async {
             let blobs_from_path = self.map_to_blobs_path(&from_path);
             let blobs_to_path = self.map_to_blobs_path(&to_path);
-            self.storage.rename(&self.blobs_root, domain::storage::DocsRenameReq {
+            self.storage.rename(&self.username, domain::storage::DocsRenameReq {
                 from: Some(blobs_from_path),
                 to: Some(blobs_to_path),
             }).await

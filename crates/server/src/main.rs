@@ -1,6 +1,8 @@
 mod init;
 
 use std::net::SocketAddr;
+use infra::sqlx; // Import sqlx from infra
+use infra::sqlx::Row; // Import Row trait
 
 #[tokio::main]
 async fn main() {
@@ -21,6 +23,30 @@ async fn main() {
     let storage_service = state.storage_service.clone();
     tokio::spawn(async move {
         storage_service.run_trash_purger().await;
+    });
+
+    // 2.5 Mount FUSE for all existing users
+    let db = state.db.clone();
+    let blob_fs = state.blob_fs_service.clone();
+    tokio::spawn(async move {
+        // Wait a short time for DB to be fully ready (though init() already ensures connection)
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        match sqlx::query("SELECT username FROM users").fetch_all(&db).await {
+            Ok(rows) => {
+                for row in rows {
+                    let username: String = row.get("username");
+                    if let Err(e) = blob_fs.mount_for_user(&username).await {
+                        tracing::error!("Failed to mount blob storage for user {}: {}", username, e);
+                    } else {
+                        tracing::info!("Mounted blob storage for user {}", username);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch users for FUSE mounting: {}", e);
+            }
+        }
     });
 
     // 3. Start Static Server
