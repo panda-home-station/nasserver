@@ -5,6 +5,7 @@ use std::str::FromStr;
 pub struct DbPools {
     pub sys: PgPool,      // 使用 role_sys
     pub storage: PgPool,  // 使用 role_storage
+    pub agent: PgPool,    // 使用 role_agent
 }
 
 pub async fn init_db(db_url: &str) -> DbPools {
@@ -29,12 +30,16 @@ pub async fn init_db(db_url: &str) -> DbPools {
     // storage 专用连接池 (使用 role_storage)
     let storage_pool = create_pool(db_url, "role_storage", "storage, sys, public").await;
 
+    // agent 专用连接池 (使用 role_agent)
+    let agent_pool = create_pool(db_url, "role_agent", "agent, sys, public").await;
+
     // 4. 如果存在旧的 SQLite 数据库，执行数据迁移
     crate::data_migration::migrate_from_sqlite_if_needed(&sys_pool).await;
 
     DbPools {
         sys: sys_pool,
         storage: storage_pool,
+        agent: agent_pool,
     }
 }
 
@@ -101,6 +106,9 @@ async fn prepare_database(db_url: &str) {
             IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_storage') THEN
                 CREATE ROLE role_storage;
             END IF;
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_agent') THEN
+                CREATE ROLE role_agent;
+            END IF;
         END
         $$;
     "#;
@@ -110,7 +118,7 @@ async fn prepare_database(db_url: &str) {
     }
 
     // 3. 将角色授予应用用户，以便后端可以切换角色
-    let grant_query = format!("GRANT role_sys, role_storage TO \"{}\"", target_user);
+    let grant_query = format!("GRANT role_sys, role_storage, role_agent TO \"{}\"", target_user);
     let _ = sqlx::query(&grant_query).execute(&mut conn).await;
 
     // 4. 连接到目标数据库授予角色对 schema public 的权限 (Postgres 15+ 默认限制)
@@ -129,9 +137,12 @@ async fn prepare_database(db_url: &str) {
     let perms = [
         format!(r#"GRANT CONNECT ON DATABASE "{}" TO role_sys"#, target_db),
         format!(r#"GRANT CONNECT ON DATABASE "{}" TO role_storage"#, target_db),
+        format!(r#"GRANT CONNECT ON DATABASE "{}" TO role_agent"#, target_db),
         "GRANT ALL ON SCHEMA public TO role_sys".to_string(),
         "GRANT USAGE ON SCHEMA sys TO role_storage".to_string(),
         "GRANT USAGE ON SCHEMA storage TO role_storage".to_string(),
+        "GRANT USAGE ON SCHEMA agent TO role_agent".to_string(),
+        "GRANT USAGE ON SCHEMA sys TO role_agent".to_string(),
         format!(r#"GRANT CREATE ON DATABASE "{}" TO role_sys"#, target_db),
     ];
     
