@@ -26,6 +26,9 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub model: Option<String>,
     pub endpoint: Option<String>,
+    pub session_id: Option<String>,
+    pub user_id: Option<String>,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

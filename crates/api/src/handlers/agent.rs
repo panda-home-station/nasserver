@@ -95,32 +95,15 @@ pub async fn save_message(
     Ok(Json(msg))
 }
 
-#[derive(serde::Deserialize)]
-pub struct ChatRequestWithSession {
-    #[serde(flatten)]
-    pub base: ChatRequest,
-    pub session_id: Option<Uuid>,
-}
-
 pub async fn chat(
     State(st): State<AppState>,
-    Json(req): Json<ChatRequestWithSession>,
+    Extension(user): Extension<AuthUser>,
+    Json(mut req): Json<ChatRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    // If session_id is provided, save the last user message
-    if let Some(session_id) = req.session_id {
-        if let Some(last_msg) = req.base.messages.last() {
-            if last_msg.role == "user" {
-                let _ = st.agent_service.save_message(
-                    session_id,
-                    last_msg.role.clone(),
-                    last_msg.content.clone(),
-                    None
-                ).await;
-            }
-        }
-    }
+    // Inject user_id into request
+    req.user_id = Some(user.user_id.to_string());
 
-    let stream = st.agent_service.chat(req.base).await?;
+    let stream = st.agent_service.chat(req).await?;
     
     // Convert domain::Result<Event> stream to Result<Event, Infallible> for Sse
     let sse_stream = stream.map(|res: domain::Result<axum::response::sse::Event>| {

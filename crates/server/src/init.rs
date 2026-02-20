@@ -23,7 +23,10 @@ pub async fn init() -> AppState {
     let _ = std::fs::create_dir_all(format!("{}/vol1/User_Data", &storage_path));
     let _ = std::fs::create_dir_all(format!("{}/vol1/AppData", &storage_path));
 
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for PostgreSQL");
+    // Initialize database connection
+    // Default to Unix socket connection which is more reliable for local setup
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://jolly:password@localhost/pnas_db?host=/var/run/postgresql".to_string());
 
     let pools = db::init_db(&db_url).await;
     
@@ -35,7 +38,7 @@ pub async fn init() -> AppState {
     let blob_fs_service = Arc::new(BlobFsServiceImpl::new(storage_service.clone(), format!("{}/vol1", storage_path)));
     let auth_service = Arc::new(AuthServiceImpl::new(pools.sys.clone(), jwt_secret.clone(), storage_path.clone(), blob_fs_service.clone()));
     let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
-    let agent_service = Arc::new(AgentServiceImpl::new(pools.sys.clone()));
+    let agent_service = Arc::new(AgentServiceImpl::new(pools.sys.clone(), system_service.clone()));
     let task_service = Arc::new(TaskServiceImpl::new(pools.storage.clone()));
 
     let torrent_dir = format!("{}/torrents", storage_path);
