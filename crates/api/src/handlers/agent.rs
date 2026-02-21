@@ -95,6 +95,19 @@ pub async fn save_message(
     Ok(Json(msg))
 }
 
+#[derive(serde::Deserialize)]
+pub struct ExecuteCommandRequest {
+    pub command: String,
+}
+
+pub async fn execute_command(
+    State(st): State<AppState>,
+    Json(req): Json<ExecuteCommandRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = st.agent_service.execute_command(req.command).await?;
+    Ok(Json(result))
+}
+
 pub async fn chat(
     State(st): State<AppState>,
     Extension(user): Extension<AuthUser>,

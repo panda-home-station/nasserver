@@ -9,9 +9,10 @@ use uuid::Uuid;
 use crate::search::SearchService;
 use crate::runtime::AgentRuntime;
 use crate::providers::openai::OpenAIProvider;
-use crate::tools::{ListFilesTool, ReadFileTool, SystemInfoTool};
+use crate::tools::{ListFilesTool, ReadFileTool, SystemInfoTool, TerminalTool};
 use crate::sandbox::NoopSandbox;
 use crate::traits::{Agent, AgentConfig, AgentEvent, Tool, Sandbox};
+use terminal::{TerminalService, NoopSandbox as TerminalNoopSandbox};
 
 use sqlx::{Pool, Postgres};
 
@@ -20,6 +21,7 @@ pub struct AgentServiceImpl {
     search_service: SearchService,
     db: Pool<Postgres>,
     agent: Arc<dyn Agent>,
+    terminal: Arc<TerminalTool>,
 }
 
 impl AgentServiceImpl {
@@ -39,14 +41,20 @@ impl AgentServiceImpl {
 
         let provider = Arc::new(OpenAIProvider::new(api_key, model).with_base_url(base_url));
         
+        // Use NoopSandbox for now to be safe, can switch to DockerSandbox
+        let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox); 
+        
+        // Terminal Service setup
+        let terminal_sandbox = Arc::new(TerminalNoopSandbox);
+        let terminal_service = Arc::new(TerminalService::new(terminal_sandbox.clone(), terminal_sandbox.clone()));
+        let terminal = Arc::new(TerminalTool::new(terminal_service));
+
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(ListFilesTool),
             Arc::new(ReadFileTool),
             Arc::new(SystemInfoTool::new(system_service)),
+            terminal.clone(),
         ];
-        
-        // Use NoopSandbox for now to be safe, can switch to DockerSandbox
-        let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox); 
         
         let agent = Arc::new(AgentRuntime::new(provider, tools, sandbox));
 
@@ -55,6 +63,7 @@ impl AgentServiceImpl {
             search_service: SearchService::new(),
             db,
             agent,
+            terminal,
         }
     }
 }
@@ -275,5 +284,17 @@ impl AgentService for AgentServiceImpl {
             .await
             .map_err(|e| Error::Database(e.to_string()))?;
         Ok(())
+    }
+
+    async fn execute_command(&self, command: String) -> Result<serde_json::Value> {
+        let (stdout, stderr, code) = self.terminal.execute_script(&command, "host").await.map_err(|e| Error::Internal(e.to_string()))?;
+        let cwd = self.terminal.get_host_cwd();
+        
+        Ok(serde_json::json!({
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": code,
+            "cwd": cwd
+        }))
     }
 }

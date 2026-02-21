@@ -13,6 +13,7 @@ members = [
     "crates/api",
     "crates/domain",
     "crates/fuse_fs",
+    "crates/terminal",
 ]
 resolver = "2"
 
@@ -76,3 +77,4 @@ infra = { path = "crates/infra" }
 api = { path = "crates/api" }
 domain = { path = "crates/domain" }
 fuse_fs = { path = "crates/fuse_fs" }
+terminal = { path = "crates/terminal" }

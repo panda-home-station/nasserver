@@ -19,6 +19,7 @@ sysinfo = { workspace = true }
 tokio-stream = { workspace = true }
 domain = { workspace = true, features = ["sqlx"] }
 sqlx = { workspace = true }
+terminal = { workspace = true }
 
 [lints]
 workspace = true
