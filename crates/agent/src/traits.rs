@@ -83,7 +83,7 @@ pub trait Agent: Send + Sync {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    async fn complete(&self, messages: &[Message], tools: &[ToolDefinition], config: Option<&AgentConfig>) -> Result<CompletionResponse>;
+    async fn complete(&self, session_id: &str, messages: &[Message], tools: &[ToolDefinition], config: Option<&AgentConfig>) -> Result<CompletionResponse>;
 }
 
 #[async_trait]

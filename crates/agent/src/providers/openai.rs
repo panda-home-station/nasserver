@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
+use crate::utils::append_chat_log;
 
 #[derive(Debug, Clone)]
 pub struct OpenAIProvider {
@@ -99,6 +100,7 @@ struct OpenAIMessageResponse {
 impl Provider for OpenAIProvider {
     async fn complete(
         &self,
+        session_id: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
         config: Option<&AgentConfig>,
@@ -168,6 +170,10 @@ impl Provider for OpenAIProvider {
             tools: openai_tools,
         };
 
+        if let Ok(json_req) = serde_json::to_string_pretty(&request) {
+             append_chat_log(session_id, format!("API_REQUEST: {}", json_req));
+        }
+
         let url = format!("{}/chat/completions", base_url);
         let resp = self
             .client
@@ -180,15 +186,21 @@ impl Provider for OpenAIProvider {
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
+            append_chat_log(session_id, format!("API_ERROR: {}", error_text));
             return Err(crate::traits::AgentError::ProviderError(format!(
                 "OpenAI API error: {}",
                 error_text
             )));
         }
 
-        let response_body: OpenAIResponse = resp
-            .json()
+        let response_text = resp
+            .text()
             .await
+            .map_err(|e| crate::traits::AgentError::ProviderError(e.to_string()))?;
+        
+        append_chat_log(session_id, format!("API_RESPONSE: {}", response_text));
+
+        let response_body: OpenAIResponse = serde_json::from_str(&response_text)
             .map_err(|e| crate::traits::AgentError::ProviderError(e.to_string()))?;
 
         let choice = response_body

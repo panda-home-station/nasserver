@@ -9,6 +9,7 @@ pub mod providers;
 pub mod tools;
 pub mod sandbox;
 pub mod runtime;
+pub mod utils;
 
 pub use agent_service::AgentServiceImpl;
 pub use runtime::AgentRuntime;

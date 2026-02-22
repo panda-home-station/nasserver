@@ -71,13 +71,14 @@ impl AgentRuntime {
 #[async_trait]
 impl Agent for AgentRuntime {
     #[instrument(skip(self))]
-    async fn chat(&self, _session_id: &str, input: &str, history: Vec<Message>, config: Option<AgentConfig>) -> Result<BoxStream<'static, Result<AgentEvent>>> {
+    async fn chat(&self, session_id: &str, input: &str, history: Vec<Message>, config: Option<AgentConfig>) -> Result<BoxStream<'static, Result<AgentEvent>>> {
         let (tx, rx) = mpsc::channel(100);
         
         let runtime = self.clone();
         let input = input.to_string();
         let mut messages = history;
         let config = config;
+        let session_id = session_id.to_string();
 
         tokio::spawn(async move {
             // Ensure system prompt is present
@@ -115,7 +116,7 @@ impl Agent for AgentRuntime {
 
                 // Notify thinking (implied by loop start)
                 
-                let response = match runtime.provider.complete(&messages, &tool_defs, config.as_ref()).await {
+                let response = match runtime.provider.complete(&session_id, &messages, &tool_defs, config.as_ref()).await {
                     Ok(resp) => resp,
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;

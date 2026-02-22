@@ -13,6 +13,7 @@ use crate::tools::TerminalTool;
 use crate::sandbox::NoopSandbox;
 use crate::traits::{Agent, AgentConfig, AgentEvent, Tool, Sandbox, Provider};
 use terminal::TerminalService;
+use crate::utils::append_chat_log;
 
 use sqlx::{Pool, Postgres};
 
@@ -153,6 +154,9 @@ impl AgentService for AgentServiceImpl {
         // Save user message
         self.save_message(session_id, "user".to_string(), last_message.content.clone(), None).await?;
         
+        // Log user message
+        append_chat_log(&session_id.to_string(), format!("USER: {}", last_message.content));
+        
         // Fetch history
         let history_entities = self.get_session_messages(session_id).await?;
         let history: Vec<crate::traits::Message> = history_entities.into_iter().map(|e| {
@@ -205,29 +209,35 @@ impl AgentService for AgentServiceImpl {
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         // Map AgentEvent to SSE Event
-        let sse_stream = stream.map(|result| {
+        let session_id_str = session_id.to_string();
+        let sse_stream = stream.map(move |result| {
             match result {
                 Ok(event) => {
                     match event {
                         AgentEvent::Thought(thought) => {
+                             append_chat_log(&session_id_str, format!("THOUGHT: {}", thought));
                              let data = serde_json::json!({ "type": "thought", "content": thought }).to_string();
                              Ok(Event::default().event("thought").data(data))
                         },
                         AgentEvent::ToolCall(call) => {
+                             append_chat_log(&session_id_str, format!("TOOL_CALL: {} ({})", call.function.name, call.function.arguments));
                              let data = serde_json::json!({ "type": "tool_call", "content": { "id": call.id, "function": call.function } }).to_string();
                              Ok(Event::default().event("tool_call").data(data))
                         },
                         AgentEvent::ToolResult { id, result } => {
+                             append_chat_log(&session_id_str, format!("TOOL_RESULT: {} -> {}", id, result));
                              let data = serde_json::json!({ "type": "tool_result", "content": { "id": id, "result": result } }).to_string();
                              Ok(Event::default().event("tool_result").data(data))
                         },
                         AgentEvent::Answer(answer) => {
+                             append_chat_log(&session_id_str, format!("ANSWER: {}", answer));
                              let data = serde_json::json!({ "type": "answer", "content": answer }).to_string();
                              Ok(Event::default().event("message").data(data))
                         }
                     }
                 },
                 Err(e) => {
+                     append_chat_log(&session_id_str, format!("ERROR: {}", e));
                      let data = serde_json::json!({ "type": "error", "content": e.to_string() }).to_string();
                      Ok(Event::default().event("error").data(data))
                 }
