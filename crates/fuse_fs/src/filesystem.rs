@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Seek, Write};
 use std::path::PathBuf;
@@ -25,6 +25,8 @@ pub struct BlobFs<S: StorageService + Send + Sync + 'static> {
     inode_manager: Arc<std::sync::Mutex<InodeManager>>,
     write_timestamps: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
     dirty_files: Arc<std::sync::Mutex<HashMap<u64, PathBuf>>>,
+    open_counts: Arc<std::sync::Mutex<HashMap<u64, usize>>>,
+    deleted_inodes: Arc<std::sync::Mutex<HashSet<u64>>>,
 }
 
 impl<S: StorageService + Send + Sync + 'static> BlobFs<S> {
@@ -36,6 +38,8 @@ impl<S: StorageService + Send + Sync + 'static> BlobFs<S> {
             inode_manager: Arc::new(std::sync::Mutex::new(InodeManager::new())),
             write_timestamps: Arc::new(std::sync::Mutex::new(HashMap::new())),
             dirty_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            open_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            deleted_inodes: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -89,15 +93,16 @@ impl<S: StorageService + Send + Sync + 'static> BlobFs<S> {
             }
         }
 
-        let now = SystemTime::now();
+        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(entry.modified_ts as u64);
+        
         FileAttr {
             ino: inode,
             size: entry.size as u64,
             blocks: ((entry.size + 511) / 512) as u64,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
+            atime: mtime,
+            mtime: mtime,
+            ctime: mtime,
+            crtime: mtime,
             kind: if entry.is_dir {
                 FileType::Directory
             } else {
@@ -129,7 +134,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
             }
         };
 
-        info!("BlobFs: lookup parent={} name={}", parent, name_str);
+        debug!("BlobFs: lookup parent={} name={}", parent, name_str);
 
         let parent_path = match self.get_path_for_inode(parent) {
             Some(p) => p,
@@ -180,7 +185,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        info!("BlobFs: getattr ino={}", ino);
+        debug!("BlobFs: getattr ino={}", ino);
 
         if ino == FUSE_ROOT_ID {
             let now = SystemTime::now();
@@ -549,7 +554,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
         };
 
         debug!("create: parent={}, name={}, mode={}", parent, name_str, mode);
-        info!("Starting file upload (create): parent_ino={}, name={}", parent, name_str);
+        debug!("Starting file upload (create): parent_ino={}, name={}", parent, name_str);
 
         let parent_path = match self.get_path_for_inode(parent) {
             Some(p) => p,
@@ -583,6 +588,13 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
         match result {
             Ok(()) => {
                 let inode = self.get_or_create_inode_for_path(&full_path);
+                
+                // Track open count
+                {
+                    let mut counts = self.open_counts.lock().unwrap();
+                    *counts.entry(inode).or_insert(0) += 1;
+                }
+
                 let now = SystemTime::now();
                 let attr = FileAttr {
                     ino: inode,
@@ -701,6 +713,12 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
             }
         }
         
+        // Track open count
+        {
+            let mut counts = self.open_counts.lock().unwrap();
+            *counts.entry(ino).or_insert(0) += 1;
+        }
+
         reply.opened(0, 0);
     }
 
@@ -864,7 +882,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
                 }
 
                 reply.written(data.len() as u32);
-                info!("Finished writing chunk to file: ino={}, size={}", ino, data.len());
+                debug!("Finished writing chunk to file: ino={}, size={}", ino, data.len());
             }
             Err(e) => {
                 error!("Failed to open file {:?}: {}", physical_path, e);
@@ -898,6 +916,12 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
             format!("{}/{}", parent_path, name_str)
         };
 
+        // Get inode before deleting
+        let inode = {
+             let manager = self.inode_manager.lock().unwrap();
+             manager.get_inode(&full_path)
+        };
+
         let rt = match tokio::runtime::Handle::try_current() {
             Ok(rt) => rt,
             Err(_) => {
@@ -916,8 +940,29 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
 
         match result {
             Ok(()) => {
-                // Remove from inode manager
-                {
+                if let Some(ino) = inode {
+                    let is_open = {
+                        let counts = self.open_counts.lock().unwrap();
+                        *counts.get(&ino).unwrap_or(&0) > 0
+                    };
+
+                    if is_open {
+                        debug!("unlink: File {} (ino={}) is open, marking for deletion", full_path, ino);
+                        let mut deleted = self.deleted_inodes.lock().unwrap();
+                        deleted.insert(ino);
+                        // Do NOT remove from inode manager yet
+                    } else {
+                        // Not open, remove immediately
+                        let mut manager = self.inode_manager.lock().unwrap();
+                        manager.remove_path(&full_path);
+                        
+                        // Cleanup dirty file if any
+                         let mut dirty = self.dirty_files.lock().unwrap();
+                         if let Some(path) = dirty.remove(&ino) {
+                             let _ = std::fs::remove_file(path);
+                         }
+                    }
+                } else {
                     let mut manager = self.inode_manager.lock().unwrap();
                     manager.remove_path(&full_path);
                 }
@@ -988,7 +1033,52 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
     }
 
     fn release(&mut self, _req: &Request, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
-        info!("File release/close: ino={}", ino);
+        debug!("File release/close: ino={}", ino);
+
+        let count = {
+            let mut counts = self.open_counts.lock().unwrap();
+            let c = counts.entry(ino).or_insert(0);
+            if *c > 0 {
+                *c -= 1;
+            }
+            *c
+        };
+
+        if count > 0 {
+             reply.ok();
+             return;
+        }
+        
+        // Last close, clean up counts
+        {
+            let mut counts = self.open_counts.lock().unwrap();
+            counts.remove(&ino);
+        }
+
+        // Check if deleted
+        let is_deleted = {
+            let mut deleted = self.deleted_inodes.lock().unwrap();
+            deleted.remove(&ino)
+        };
+
+        if is_deleted {
+            debug!("release: File ino={} was deleted, cleaning up without commit", ino);
+             // Remove dirty file
+             let mut dirty = self.dirty_files.lock().unwrap();
+             if let Some(path) = dirty.remove(&ino) {
+                 let _ = std::fs::remove_file(path);
+             }
+             
+             // Remove from inode manager
+             if let Some(path) = self.get_path_for_inode(ino) {
+                 let path_clone = path.clone();
+                 let mut manager = self.inode_manager.lock().unwrap();
+                 manager.remove_path(&path_clone);
+             }
+             
+             reply.ok();
+             return;
+        }
         
         // Commit dirty file if exists
         let dirty_path = {
@@ -997,7 +1087,7 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
         };
 
         if let Some(temp_path) = dirty_path {
-             info!("Committing dirty file for ino={}: {:?}", ino, temp_path);
+             debug!("Committing dirty file for ino={}: {:?}", ino, temp_path);
              
              let path = match self.get_path_for_inode(ino) {
                 Some(p) => p,
@@ -1032,13 +1122,42 @@ impl<S: StorageService + Send + Sync + 'static> Filesystem for BlobFs<S> {
             let mut timestamps = self.write_timestamps.lock().unwrap();
             if let Some(last_write_time) = timestamps.remove(&ino) {
                 let finalization_duration = last_write_time.elapsed();
-                info!(
+                debug!(
                     "File finalization took: {:.2}s (from last write to release)",
                     finalization_duration.as_secs_f64()
                 );
             }
         }
 
+        reply.ok();
+    }
+
+    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        debug!("flush: ino={}", ino);
+        // We could sync the dirty file here if we wanted to be stricter,
+        // but flush is often called on every close, so maybe just return OK.
+        // Real sync happens in fsync or release.
+        reply.ok();
+    }
+
+    fn fsync(&mut self, _req: &Request, ino: u64, _fh: u64, datasync: bool, reply: ReplyEmpty) {
+        debug!("fsync: ino={}, datasync={}", ino, datasync);
+        
+        let dirty_path = {
+            let dirty = self.dirty_files.lock().unwrap();
+            dirty.get(&ino).cloned()
+        };
+
+        if let Some(path) = dirty_path {
+            if let Ok(file) = std::fs::File::open(&path) {
+                if let Err(e) = file.sync_all() {
+                    error!("fsync: Failed to sync dirty file {:?}: {}", path, e);
+                    reply.error(EIO);
+                    return;
+                }
+            }
+        }
+        
         reply.ok();
     }
 

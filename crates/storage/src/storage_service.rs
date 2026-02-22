@@ -130,12 +130,13 @@ impl StorageService for StorageServiceImpl {
         let mut entries = Vec::new();
         for row in rows {
             let id: uuid::Uuid = row.get("id");
+            let updated_at: Option<chrono::DateTime<Utc>> = row.get("updated_at");
             entries.push(DocsEntry {
                 id: id.to_string(),
                 name: row.get("name"),
                 is_dir: row.get::<String, _>("mime") == "inode/directory",
                 size: row.get("size"),
-                modified_ts: 0, // Should parse from DB if needed
+                modified_ts: updated_at.map(|t| t.timestamp()).unwrap_or(0),
                 mime: row.get("mime"),
             });
         }
@@ -366,22 +367,74 @@ impl StorageService for StorageServiceImpl {
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
 
-            let trash_prefix = format!("/Trash/{}", Utc::now().format("%Y%m%d"));
+            let trash_base = format!("/Trash/{}", Utc::now().format("%Y%m%d"));
+            
+            // Determine target directory in trash
+            // If parent is "/", target is "/Trash/Date"
+            // If parent is "/A", target is "/Trash/Date/A"
+            let target_dir = if parent == "/" {
+                trash_base.clone()
+            } else {
+                format!("{}{}", trash_base, parent)
+            };
+
+            // Check for collision and resolve name
+            let mut final_name = name.to_string();
+            let mut i = 1;
+
+            loop {
+                let exists: bool = sqlx::query_scalar("select count(*) > 0 from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
+                    .bind(user_id)
+                    .bind(&target_dir)
+                    .bind(&final_name)
+                    .fetch_one(&self.db)
+                    .await
+                    .map_err(|e| DomainError::Database(e.to_string()))?;
+
+                if !exists {
+                    break;
+                }
+
+                let path = Path::new(name);
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                let ext = path.extension().map(|e| e.to_string_lossy().to_string());
+
+                if let Some(e) = ext {
+                    final_name = format!("{} ({}).{}", stem, i, e);
+                } else {
+                    final_name = format!("{} ({})", stem, i);
+                }
+                i += 1;
+            }
 
             if let Some(mime) = mime_opt {
                 if mime == "inode/directory" {
                     let from_dir = full_path.clone();
                     let like_pat = format!("{}/%", from_dir);
-                    sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and (dir = $3 or dir like $4)")
-                        .bind(&trash_prefix)
+                    
+                    // New root for children: target_dir / final_name
+                    let new_subtree_root = if target_dir == "/" {
+                        format!("/{}", final_name)
+                    } else {
+                        format!("{}/{}", target_dir, final_name)
+                    };
+
+                    // Update children (recursive)
+                    // We use substring to replace the old prefix (from_dir) with new_subtree_root
+                    sqlx::query("update storage.cloud_files set dir = $1 || substring(dir from length($2) + 1), updated_at = CURRENT_TIMESTAMP where user_id = $3 and (dir = $4 or dir like $5)")
+                        .bind(&new_subtree_root)
+                        .bind(&from_dir) 
                         .bind(user_id)
                         .bind(&from_dir)
                         .bind(&like_pat)
                         .execute(&self.db)
                         .await
                         .map_err(|e| DomainError::Database(e.to_string()))?;
-                    sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and dir = $3 and name = $4")
-                        .bind(&trash_prefix)
+
+                    // Update directory itself
+                    sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
+                        .bind(&target_dir)
+                        .bind(&final_name)
                         .bind(user_id)
                         .bind(parent)
                         .bind(name)
@@ -389,8 +442,10 @@ impl StorageService for StorageServiceImpl {
                         .await
                         .map_err(|e| DomainError::Database(e.to_string()))?;
                 } else {
-                    sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and dir = $3 and name = $4")
-                        .bind(&trash_prefix)
+                    // File
+                    sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
+                        .bind(&target_dir)
+                        .bind(&final_name)
                         .bind(user_id)
                         .bind(parent)
                         .bind(name)
@@ -399,13 +454,13 @@ impl StorageService for StorageServiceImpl {
                         .map_err(|e| DomainError::Database(e.to_string()))?;
                 }
             } else {
-                let from_dir = full_path.clone();
-                let like_pat = format!("{}/%", from_dir);
-                sqlx::query("update storage.cloud_files set dir = $1 || dir, updated_at = CURRENT_TIMESTAMP where user_id = $2 and (dir = $3 or dir like $4)")
-                    .bind(&trash_prefix)
+                 // Fallback if mime not found (treat as file/safe update)
+                 sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
+                    .bind(&target_dir)
+                    .bind(&final_name)
                     .bind(user_id)
-                    .bind(&from_dir)
-                    .bind(&like_pat)
+                    .bind(parent)
+                    .bind(name)
                     .execute(&self.db)
                     .await
                     .map_err(|e| DomainError::Database(e.to_string()))?;
