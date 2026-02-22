@@ -20,5 +20,6 @@ pub trait AgentService: Send + Sync {
     async fn create_session(&self, user_id: Uuid, agent_id: String, title: String) -> Result<ChatSession>;
     async fn save_message(&self, session_id: Uuid, role: String, content: String, tool_calls: Option<serde_json::Value>) -> Result<ChatMessageEntity>;
     async fn delete_session(&self, session_id: Uuid) -> Result<()>;
-    async fn execute_command(&self, command: String) -> Result<serde_json::Value>;
+    async fn execute_command(&self, user_id: Option<Uuid>, session_id: Option<String>, command: String) -> Result<serde_json::Value>;
+    async fn complete_command(&self, user_id: Option<Uuid>, session_id: Option<String>, command: String) -> Result<Vec<String>>;
 }

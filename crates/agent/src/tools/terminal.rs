@@ -16,7 +16,7 @@ impl TerminalTool {
     }
 
     pub fn get_host_cwd(&self) -> String {
-        self.service.get_host_cwd()
+        self.service.get_user_cwd()
     }
 
     /// Execute a command and return structured output

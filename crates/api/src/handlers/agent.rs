@@ -98,14 +98,31 @@ pub async fn save_message(
 #[derive(serde::Deserialize)]
 pub struct ExecuteCommandRequest {
     pub command: String,
+    pub session_id: Option<String>,
 }
 
 pub async fn execute_command(
     State(st): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Json(req): Json<ExecuteCommandRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = st.agent_service.execute_command(req.command).await?;
-    Ok(Json(result))
+    let resp = st.agent_service.execute_command(Some(user.user_id), req.session_id, req.command).await?;
+    Ok(Json(resp))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CompleteCommandRequest {
+    pub command: String,
+    pub session_id: Option<String>,
+}
+
+pub async fn complete_command(
+    State(st): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<CompleteCommandRequest>,
+) -> ApiResult<Json<Vec<String>>> {
+    let suggestions = st.agent_service.complete_command(Some(user.user_id), req.session_id, req.command).await?;
+    Ok(Json(suggestions))
 }
 
 pub async fn chat(

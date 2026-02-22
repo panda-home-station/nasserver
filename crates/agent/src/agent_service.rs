@@ -1,4 +1,4 @@
-use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep, ChatSession, ChatMessageEntity}, system::SystemService};
+use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep, ChatSession, ChatMessageEntity}, system::SystemService, storage::StorageService, auth::AuthService};
 use async_trait::async_trait;
 use axum::response::sse::Event;
 use futures_util::stream::{BoxStream, StreamExt};
@@ -11,8 +11,8 @@ use crate::runtime::AgentRuntime;
 use crate::providers::openai::OpenAIProvider;
 use crate::tools::{ListFilesTool, ReadFileTool, SystemInfoTool, TerminalTool};
 use crate::sandbox::NoopSandbox;
-use crate::traits::{Agent, AgentConfig, AgentEvent, Tool, Sandbox};
-use terminal::{TerminalService, NoopSandbox as TerminalNoopSandbox};
+use crate::traits::{Agent, AgentConfig, AgentEvent, Tool, Sandbox, Provider};
+use terminal::TerminalService;
 
 use sqlx::{Pool, Postgres};
 
@@ -20,12 +20,22 @@ pub struct AgentServiceImpl {
     tasks: Arc<Mutex<HashMap<String, AgentTask>>>,
     search_service: SearchService,
     db: Pool<Postgres>,
-    agent: Arc<dyn Agent>,
-    terminal: Arc<TerminalTool>,
+    storage_service: Arc<dyn StorageService>,
+    auth_service: Arc<dyn AuthService>,
+    system_service: Arc<dyn SystemService>,
+    provider: Arc<dyn Provider>,
+    sandbox: Arc<dyn Sandbox>,
+    active_cwds: Arc<Mutex<HashMap<String, Arc<Mutex<String>>>>>,
 }
 
 impl AgentServiceImpl {
-    pub fn new(db: Pool<Postgres>, system_service: Arc<dyn SystemService>) -> Self {
+    pub fn new(
+        db: Pool<Postgres>,
+        system_service: Arc<dyn SystemService>,
+        storage_service: Arc<dyn StorageService>,
+        auth_service: Arc<dyn AuthService>,
+        _mount_root: String
+    ) -> Self {
         // Initialize Agent
         // Default to Ollama local if not provided via request
         let api_key = std::env::var("PNAS_AGENT_OLLAMA_API_KEY").unwrap_or_else(|_| "sk-dummy".to_string());
@@ -44,26 +54,16 @@ impl AgentServiceImpl {
         // Use NoopSandbox for now to be safe, can switch to DockerSandbox
         let sandbox: Arc<dyn Sandbox> = Arc::new(NoopSandbox); 
         
-        // Terminal Service setup
-        let terminal_sandbox = Arc::new(TerminalNoopSandbox);
-        let terminal_service = Arc::new(TerminalService::new(terminal_sandbox.clone(), terminal_sandbox.clone()));
-        let terminal = Arc::new(TerminalTool::new(terminal_service));
-
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(ListFilesTool),
-            Arc::new(ReadFileTool),
-            Arc::new(SystemInfoTool::new(system_service)),
-            terminal.clone(),
-        ];
-        
-        let agent = Arc::new(AgentRuntime::new(provider, tools, sandbox));
-
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             search_service: SearchService::new(),
             db,
-            agent,
-            terminal,
+            storage_service,
+            auth_service,
+            system_service,
+            provider,
+            sandbox,
+            active_cwds: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -135,12 +135,14 @@ impl AgentService for AgentServiceImpl {
              return Err(Error::BadRequest("Last message must be from user".to_string()));
         }
 
+        // Ensure user_id is present (injected by handler)
+        let user_id_str = req.user_id.clone().ok_or_else(|| Error::BadRequest("user_id required".to_string()))?;
+        let user_id = Uuid::parse_str(&user_id_str).map_err(|_| Error::BadRequest("Invalid user_id".to_string()))?;
+
         let session_id = if let Some(sid) = &req.session_id {
             Uuid::parse_str(sid).map_err(|_| Error::BadRequest("Invalid session_id".to_string()))?
         } else {
             // New session
-            let user_id_str = req.user_id.clone().ok_or_else(|| Error::BadRequest("user_id required for new session".to_string()))?;
-            let user_id = Uuid::parse_str(&user_id_str).map_err(|_| Error::BadRequest("Invalid user_id".to_string()))?;
             let agent_id = req.agent_id.clone().unwrap_or_else(|| "default".to_string());
             let title = last_message.content.chars().take(20).collect::<String>();
             
@@ -164,12 +166,37 @@ impl AgentService for AgentServiceImpl {
                 },
                 content: Some(e.content),
                 tool_calls: e.tool_calls.map(|v| serde_json::from_value(v).unwrap_or_default()),
-                tool_call_id: None, // We don't store this yet in DB or need to parse from content?
-                // Actually tool_role messages need tool_call_id.
-                // Our DB schema `chat_messages` doesn't seem to have `tool_call_id`.
-                // For now, ignore tool_call_id restoration or assume it's part of content/tool_calls.
+                tool_call_id: None,
             }
         }).collect();
+
+        // Create Agent for user
+        let user_val = self.auth_service.get_user_by_id(&user_id_str).await.map_err(|e| Error::Internal(e.to_string()))?;
+        let username = user_val.get("username").and_then(|v| v.as_str()).unwrap_or("admin").to_string();
+
+        let cwd_ref = {
+            let mut cwds = self.active_cwds.lock().unwrap();
+            cwds.entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(format!("/User/{}", username))))
+                .clone()
+        };
+
+        let terminal_service = Arc::new(TerminalService::new(
+            self.storage_service.clone(),
+            self.auth_service.clone(),
+            self.system_service.clone(),
+            username
+        ).with_cwd_ref(cwd_ref));
+        let terminal = Arc::new(TerminalTool::new(terminal_service));
+
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(ListFilesTool),
+            Arc::new(ReadFileTool),
+            Arc::new(SystemInfoTool::new(self.system_service.clone())),
+            terminal.clone(),
+        ];
+        
+        let agent = AgentRuntime::new(self.provider.clone(), tools, self.sandbox.clone());
 
         // Call Agent
         let config = Some(AgentConfig {
@@ -177,7 +204,7 @@ impl AgentService for AgentServiceImpl {
             endpoint: req.endpoint.clone(),
         });
 
-        let stream = self.agent.chat(&session_id.to_string(), &last_message.content, history, config).await
+        let stream = agent.chat(&session_id.to_string(), &last_message.content, history, config).await
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         // Map AgentEvent to SSE Event
@@ -286,9 +313,36 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
-    async fn execute_command(&self, command: String) -> Result<serde_json::Value> {
-        let (stdout, stderr, code) = self.terminal.execute_script(&command, "host").await.map_err(|e| Error::Internal(e.to_string()))?;
-        let cwd = self.terminal.get_host_cwd();
+    async fn execute_command(&self, user_id: Option<Uuid>, session_id: Option<String>, command: String) -> Result<serde_json::Value> {
+        let username = if let Some(uid) = user_id {
+            // Get username from auth service
+            let user_val = self.auth_service.get_user_by_id(&uid.to_string()).await.map_err(|e| Error::Internal(e.to_string()))?;
+            user_val.get("username").and_then(|v| v.as_str()).unwrap_or("admin").to_string()
+        } else {
+            "admin".to_string()
+        };
+
+        // Determine session key (session_id > user_id > "default")
+        let key = session_id.unwrap_or_else(|| user_id.map(|u| u.to_string()).unwrap_or_else(|| "default".to_string()));
+
+        let cwd_ref = {
+            let mut cwds = self.active_cwds.lock().unwrap();
+            cwds.entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(format!("/User/{}", username))))
+                .clone()
+        };
+
+        let terminal_service = Arc::new(TerminalService::new(
+            self.storage_service.clone(),
+            self.auth_service.clone(),
+            self.system_service.clone(),
+            username
+        ).with_cwd_ref(cwd_ref));
+        
+        let terminal = TerminalTool::new(terminal_service);
+
+        let (stdout, stderr, code) = terminal.execute_script(&command, "host").await.map_err(|e| Error::Internal(e.to_string()))?;
+        let cwd = terminal.get_host_cwd();
         
         Ok(serde_json::json!({
             "stdout": stdout,
@@ -296,5 +350,48 @@ impl AgentService for AgentServiceImpl {
             "exit_code": code,
             "cwd": cwd
         }))
+    }
+
+    async fn complete_command(&self, user_id: Option<Uuid>, session_id: Option<String>, command: String) -> Result<Vec<String>> {
+        let username = if let Some(uid) = user_id {
+            // AuthService get_user_by_id returns User struct or similar, we need to adapt
+            // Assuming get_user_by_id returns Result<User> and User has username field
+            match self.auth_service.get_user_by_id(&uid.to_string()).await {
+                Ok(user) => user.get("username").and_then(|v| v.as_str()).unwrap_or("admin").to_string(),
+                Err(_) => "admin".to_string()
+            }
+        } else {
+            "admin".to_string()
+        };
+
+        // Create a temporary TerminalService or reuse one if cached
+        // Note: For completion, we need the current CWD which is stored in active_cwds
+        
+        let mut terminal_service = TerminalService::new(
+            self.storage_service.clone(),
+            self.auth_service.clone(),
+            self.system_service.clone(),
+            username.clone(),
+        );
+
+        // Restore CWD if session exists
+        if let Some(sid) = session_id {
+            let mut cwds = self.active_cwds.lock().unwrap();
+            if let Some(cwd) = cwds.get(&sid) {
+                terminal_service = terminal_service.with_cwd_ref(cwd.clone());
+            } else {
+                // Initialize new session CWD
+                let new_cwd = Arc::new(Mutex::new(format!("/User/{}", username)));
+                terminal_service = terminal_service.with_cwd_ref(new_cwd.clone());
+                cwds.insert(sid, new_cwd);
+            }
+        } else {
+             // Fallback for session-less requests (should ideally have session)
+             let new_cwd = Arc::new(Mutex::new(format!("/User/{}", username)));
+             terminal_service = terminal_service.with_cwd_ref(new_cwd);
+        }
+
+        let suggestions = terminal_service.complete(&command).await;
+        Ok(suggestions)
     }
 }

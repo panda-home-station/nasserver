@@ -80,6 +80,7 @@ pub fn api_app(state: AppState) -> Router {
         .route("/api/agent/tasks", post(crate::handlers::agent::create_task))
         .route("/api/agent/tasks/:id", get(crate::handlers::agent::get_task))
         .route("/api/agent/terminal/exec", post(crate::handlers::agent::execute_command))
+        .route("/api/agent/terminal/complete", post(crate::handlers::agent::complete_command))
         .route("/api/system/stats", get(system::get_current_stats))
         .route("/api/system/stats/history", get(system::get_stats_history))
         // New App Management API

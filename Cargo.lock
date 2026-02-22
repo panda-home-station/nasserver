@@ -3913,6 +3913,8 @@ name = "terminal"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "domain",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

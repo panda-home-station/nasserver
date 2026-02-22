@@ -38,7 +38,13 @@ pub async fn init() -> AppState {
     let blob_fs_service = Arc::new(BlobFsServiceImpl::new(storage_service.clone(), format!("{}/vol1", storage_path)));
     let auth_service = Arc::new(AuthServiceImpl::new(pools.sys.clone(), jwt_secret.clone(), storage_path.clone(), blob_fs_service.clone()));
     let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
-    let agent_service = Arc::new(AgentServiceImpl::new(pools.agent.clone(), system_service.clone()));
+    let agent_service = Arc::new(AgentServiceImpl::new(
+        pools.agent.clone(),
+        system_service.clone(),
+        storage_service.clone(),
+        auth_service.clone(),
+        format!("{}/vol1", storage_path)
+    ));
     let task_service = Arc::new(TaskServiceImpl::new(pools.storage.clone()));
 
     let torrent_dir = format!("{}/torrents", storage_path);
