@@ -14,7 +14,22 @@ impl Command for CatCommand {
     }
 
     async fn execute(&self, service: &TerminalService, args: &[&str], stdin: Option<&str>) -> Result<(String, String, i32)> {
-        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let mut targets = Vec::new();
+        let mut parsing_options = true;
+
+        for arg in args {
+            if parsing_options {
+                if *arg == "--" {
+                    parsing_options = false;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    continue;
+                }
+            }
+            targets.push(*arg);
+        }
+
         if targets.is_empty() {
             if let Some(input) = stdin {
                 return Ok((input.to_string(), "".to_string(), 0));
@@ -63,7 +78,22 @@ impl Command for MkdirCommand {
     }
 
     async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
-        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let mut targets = Vec::new();
+        let mut parsing_options = true;
+
+        for arg in args {
+            if parsing_options {
+                if *arg == "--" {
+                    parsing_options = false;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    continue;
+                }
+            }
+            targets.push(*arg);
+        }
+
         if targets.is_empty() {
             return Ok(("".to_string(), "mkdir: missing operand".to_string(), 1));
         }
@@ -115,7 +145,22 @@ impl Command for RmCommand {
     }
 
     async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
-        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let mut targets = Vec::new();
+        let mut parsing_options = true;
+
+        for arg in args {
+            if parsing_options {
+                if *arg == "--" {
+                    parsing_options = false;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    continue;
+                }
+            }
+            targets.push(*arg);
+        }
+
         if targets.is_empty() {
             return Ok(("".to_string(), "rm: missing operand".to_string(), 1));
         }
@@ -157,7 +202,22 @@ impl Command for MvCommand {
     }
 
     async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
-        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let mut targets = Vec::new();
+        let mut parsing_options = true;
+
+        for arg in args {
+            if parsing_options {
+                if *arg == "--" {
+                    parsing_options = false;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    continue;
+                }
+            }
+            targets.push(*arg);
+        }
+
         if targets.len() < 2 {
             return Ok(("".to_string(), "mv: missing operand".to_string(), 1));
         }
@@ -220,7 +280,22 @@ impl Command for TouchCommand {
     }
 
     async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
-        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let mut targets = Vec::new();
+        let mut parsing_options = true;
+
+        for arg in args {
+            if parsing_options {
+                if *arg == "--" {
+                    parsing_options = false;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    continue;
+                }
+            }
+            targets.push(*arg);
+        }
+
         if targets.is_empty() {
             return Ok(("".to_string(), "touch: missing operand".to_string(), 1));
         }
@@ -281,7 +356,22 @@ impl Command for CpCommand {
     }
 
     async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
-        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let mut targets = Vec::new();
+        let mut parsing_options = true;
+
+        for arg in args {
+            if parsing_options {
+                if *arg == "--" {
+                    parsing_options = false;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    continue;
+                }
+            }
+            targets.push(*arg);
+        }
+
         if targets.len() < 2 {
             return Ok(("".to_string(), "cp: missing operand".to_string(), 1));
         }
