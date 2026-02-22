@@ -6,6 +6,7 @@ pub mod fs;
 pub mod ls;
 pub mod cd;
 pub mod sysinfo;
+pub mod echo;
 
 #[async_trait]
 pub trait Command: Send + Sync {
@@ -13,5 +14,5 @@ pub trait Command: Send + Sync {
     fn name(&self) -> &str;
     
     /// Execute the command
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)>;
+    async fn execute(&self, service: &TerminalService, args: &[&str], stdin: Option<&str>) -> Result<(String, String, i32)>;
 }

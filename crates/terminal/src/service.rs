@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 
 use crate::error::Result;
 use domain::storage::StorageService;
@@ -13,6 +12,7 @@ use crate::commands::{
     cd::CdCommand,
     sysinfo::SysInfoCommand,
     fs::{CatCommand, MkdirCommand, RmCommand, MvCommand, TouchCommand, CpCommand},
+    echo::EchoCommand,
 };
 
 #[derive(Clone)]
@@ -97,61 +97,225 @@ impl TerminalService {
         }
     }
 
+    pub fn get_available_commands() -> Vec<&'static str> {
+        vec!["ls", "cd", "cat", "sysinfo", "mkdir", "rm", "mv", "touch", "cp", "pwd", "whoami", "echo", "help"]
+    }
+
+    pub fn get_help_text() -> String {
+        format!("Available commands: {}\n", Self::get_available_commands().join(", "))
+    }
+
     pub async fn execute_script(&self, command: &str, _env_type: &str) -> Result<(String, String, i32)> {
         let command = command.trim().to_string();
         self.execute_user_command(&command).await
     }
 
     async fn execute_user_command(&self, command: &str) -> Result<(String, String, i32)> {
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(("".to_string(), "".to_string(), 0));
-        }
+        // 1. Pre-process for Heredoc (<<EOF)
+        // We handle this manually because we need to preserve newlines for the content
+        let mut processed_command = command.to_string();
+        let mut initial_stdin = None;
 
-        let cmd = parts[0];
-        let args = &parts[1..];
-
-        match cmd {
-            "cd" => {
-                CdCommand.execute(self, args).await
-            },
-            "ls" => {
-                LsCommand.execute(self, args).await
-            },
-            "cat" => {
-                CatCommand.execute(self, args).await
-            },
-            "sysinfo" => {
-                SysInfoCommand.execute(self, args).await
-            },
-            "mkdir" => {
-                MkdirCommand.execute(self, args).await
-            },
-            "rm" => {
-                RmCommand.execute(self, args).await
-            },
-            "mv" => {
-                MvCommand.execute(self, args).await
-            },
-            "touch" => {
-                TouchCommand.execute(self, args).await
-            },
-            "cp" => {
-                CpCommand.execute(self, args).await
-            },
-
-            "pwd" => {
-                let cwd = self.get_user_cwd();
-                Ok((format!("{}\n", cwd), "".to_string(), 0))
-            },
-            "whoami" => {
-                Ok((format!("{}\n", self.current_user), "".to_string(), 0))
-            },
-
-            _ => {
-                Ok(("".to_string(), format!("{}: command not found", cmd), 127))
+        if let Some(idx) = processed_command.find("<<") {
+            let after = &processed_command[idx+2..];
+            // Find end of marker (whitespace or non-alphanumeric usually, but let's just say whitespace)
+            let marker_end = after.find(|c: char| c.is_whitespace()).unwrap_or(after.len());
+            let marker = &after[..marker_end];
+            
+            if !marker.is_empty() {
+                // Find the first newline after the marker definition to start content extraction
+                if let Some(nl_pos_rel) = processed_command[idx..].find('\n') {
+                    let abs_nl_pos = idx + nl_pos_rel;
+                    let content_start = abs_nl_pos + 1;
+                    
+                    if content_start < processed_command.len() {
+                        let rest = &processed_command[content_start..];
+                        let mut content = String::new();
+                        let mut found_end = false;
+                        
+                        for line in rest.lines() {
+                            if line.trim() == marker {
+                                found_end = true;
+                                break;
+                            }
+                            content.push_str(line);
+                            content.push('\n');
+                        }
+                        
+                        if found_end {
+                            initial_stdin = Some(content);
+                            
+                            // Reconstruct command string:
+                            // 1. Keep everything before `<<`
+                            // 2. Keep everything after `<<MARKER` but before the newline (if any args there)
+                            // 3. Ignore the content lines
+                            
+                            // For simplicity, we assume the command line ends at the first newline
+                            // and we just remove `<<MARKER` from it.
+                            let line_end = abs_nl_pos;
+                            let mut command_line = processed_command[..line_end].to_string();
+                            
+                            // Remove `<<MARKER` from command_line
+                            // We need to be careful about indices in command_line vs processed_command
+                            // `idx` is valid for command_line too since it's before line_end
+                            if let Some(local_idx) = command_line.find("<<") {
+                                // We expect local_idx to be equal to idx
+                                // Remove `<<` + marker
+                                let range_end = local_idx + 2 + marker.len();
+                                if range_end <= command_line.len() {
+                                    command_line.replace_range(local_idx..range_end, "");
+                                }
+                            }
+                            
+                            processed_command = command_line;
+                        }
+                    }
+                }
             }
         }
+
+        // 2. Tokenize with shlex
+        let tokens = match shlex::split(&processed_command) {
+            Some(t) => t,
+            None => return Ok(("".to_string(), "Syntax error: unmatched quote".to_string(), 2)),
+        };
+
+        // 3. Build Pipeline
+        let mut pipeline = Vec::new();
+        let mut current_segment = Vec::new();
+        
+        for token in tokens {
+            if token == "|" {
+                if !current_segment.is_empty() {
+                    pipeline.push(current_segment);
+                    current_segment = Vec::new();
+                }
+            } else {
+                current_segment.push(token);
+            }
+        }
+        if !current_segment.is_empty() {
+            pipeline.push(current_segment);
+        }
+
+        if pipeline.is_empty() {
+             return Ok(("".to_string(), "".to_string(), 0));
+        }
+
+        // 4. Execute Pipeline
+        let mut current_input = initial_stdin;
+        let mut final_output = (String::new(), String::new(), 0);
+
+        for segment in pipeline {
+            let mut args = Vec::new();
+            let mut redirect_target = None;
+            let mut append_mode = false;
+            
+            let mut iter = segment.into_iter();
+            while let Some(arg) = iter.next() {
+                if arg == ">" {
+                    if let Some(target) = iter.next() {
+                        redirect_target = Some(target);
+                        append_mode = false;
+                    } else {
+                        return Ok(("".to_string(), "Syntax error: missing file for redirection".to_string(), 2));
+                    }
+                } else if arg == ">>" {
+                    if let Some(target) = iter.next() {
+                        redirect_target = Some(target);
+                        append_mode = true;
+                    } else {
+                        return Ok(("".to_string(), "Syntax error: missing file for redirection".to_string(), 2));
+                    }
+                } else {
+                    args.push(arg);
+                }
+            }
+
+            if args.is_empty() { continue; }
+
+            let cmd_name = &args[0];
+            let cmd_args: Vec<&str> = args.iter().skip(1).map(|s| s.as_str()).collect();
+
+            let result = match cmd_name.as_str() {
+                "cd" => CdCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "ls" => LsCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "cat" => CatCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "sysinfo" => SysInfoCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "mkdir" => MkdirCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "rm" => RmCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "mv" => MvCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "touch" => TouchCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "cp" => CpCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "pwd" => {
+                    let cwd = self.get_user_cwd();
+                    Ok((format!("{}\n", cwd), "".to_string(), 0))
+                },
+                "whoami" => {
+                    Ok((format!("{}\n", self.current_user), "".to_string(), 0))
+                },
+                "echo" => EchoCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "help" => {
+                    Ok((Self::get_help_text(), "".to_string(), 0))
+                },
+                _ => {
+                    Ok(("".to_string(), format!("{}: command not found", cmd_name), 127))
+                }
+            };
+
+            let (stdout, stderr, code) = result?;
+
+            if code != 0 {
+                return Ok((stdout, stderr, code));
+            }
+
+            // Handle Output
+            if let Some(target) = redirect_target {
+                let path = self.resolve_path(&target);
+                
+                let storage_path;
+                let username;
+
+                if path.starts_with("/AppData") {
+                    storage_path = path;
+                    username = self.current_user.clone();
+                } else if path.starts_with(&format!("/User/{}", self.current_user)) {
+                    let rel = path.trim_start_matches(&format!("/User/{}", self.current_user));
+                    storage_path = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
+                    username = self.current_user.clone();
+                } else {
+                     return Ok(("".to_string(), format!("Cannot write to '{}': Permission denied", target), 1));
+                }
+
+                let p = std::path::Path::new(&storage_path);
+                let parent_path = p.parent().unwrap_or(std::path::Path::new("/")).to_string_lossy().to_string();
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                
+                let mut content = bytes::Bytes::from(stdout.clone());
+                
+                if append_mode {
+                    if let Ok(existing_path) = self.storage_service.get_file_path(&username, &storage_path).await {
+                        if let Ok(existing_content) = tokio::fs::read(&existing_path).await {
+                            let mut new_content = existing_content;
+                            new_content.extend_from_slice(&content);
+                            content = bytes::Bytes::from(new_content);
+                        }
+                    }
+                }
+
+                if let Err(e) = self.storage_service.save_file(&username, &parent_path, &name, content).await {
+                     return Ok(("".to_string(), format!("Failed to write to '{}': {}", target, e), 1));
+                }
+                
+                current_input = None;
+                final_output = ("".to_string(), stderr, code);
+            } else {
+                current_input = Some(stdout.clone());
+                final_output = (stdout, stderr, code);
+            }
+        }
+        
+        Ok(final_output)
     }
 
     pub async fn complete(&self, line: &str) -> Vec<String> {

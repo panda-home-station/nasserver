@@ -8,11 +8,20 @@ use terminal::TerminalService;
 #[derive(Clone)]
 pub struct TerminalTool {
     service: Arc<TerminalService>,
+    description: String,
 }
 
 impl TerminalTool {
     pub fn new(service: Arc<TerminalService>) -> Self {
-        Self { service }
+        let commands = TerminalService::get_available_commands().join(", ");
+        let description = format!(
+            "Execute Linux shell commands. You are in a NAS terminal environment with standard Linux capabilities. \
+             You can manage files, check system status, and perform administrative tasks. \
+             Available commands include but are not limited to: {}. \
+             Use 'help' to see the full list.",
+            commands
+        );
+        Self { service, description }
     }
 
     pub fn get_host_cwd(&self) -> String {
@@ -34,10 +43,7 @@ impl Tool for TerminalTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command. \
-        Use 'environment: host' for NAS file management, system checks (ls, cd, cp, mv, cat, mkdir, rm, sysinfo). \
-        Use 'environment: user' for running user scripts, python, npm, and untrusted code. \
-        Supports stateful 'cd' for host environment."
+        &self.description
     }
 
     fn parameters(&self) -> Value {
@@ -47,12 +53,6 @@ impl Tool for TerminalTool {
                 "command": {
                     "type": "string",
                     "description": "The command to execute."
-                },
-                "environment": {
-                    "type": "string",
-                    "enum": ["host", "user"],
-                    "description": "Where to execute the command. 'host' for NAS system, 'user' for docker environment.",
-                    "default": "host"
                 }
             },
             "required": ["command"]
@@ -61,14 +61,25 @@ impl Tool for TerminalTool {
 
     async fn execute(&self, args: Value, _default_sandbox: &dyn Sandbox) -> Result<String> {
         let command = args["command"].as_str().ok_or(AgentError::ToolError("Missing command".to_string()))?;
-        let env_type = args["environment"].as_str().unwrap_or("host");
         
-        let (stdout, stderr, code) = self.execute_script(command, env_type).await?;
+        let (stdout, stderr, code) = self.execute_script(command, "host").await?;
         
         if code != 0 {
             Ok(format!("Command failed with code {}:\nSTDOUT:\n{}\nSTDERR:\n{}", code, stdout, stderr))
         } else {
-            Ok(stdout)
+            let mut output = stdout;
+            if !stderr.is_empty() {
+                if !output.is_empty() {
+                    output.push_str("\nSTDERR:\n");
+                }
+                output.push_str(&stderr);
+            }
+            
+            if output.is_empty() {
+                Ok("(Command executed successfully)".to_string())
+            } else {
+                Ok(output)
+            }
         }
     }
 }

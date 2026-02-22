@@ -11,7 +11,7 @@ impl Command for SysInfoCommand {
         "sysinfo"
     }
 
-    async fn execute(&self, service: &TerminalService, _args: &[&str]) -> Result<(String, String, i32)> {
+    async fn execute(&self, service: &TerminalService, _args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
         match service.system_service.get_current_stats().await {
             Ok(stats) => {
                 match serde_json::to_string_pretty(&stats) {

@@ -159,7 +159,7 @@ impl AgentService for AgentServiceImpl {
         
         // Fetch history
         let history_entities = self.get_session_messages(session_id).await?;
-        let history: Vec<crate::traits::Message> = history_entities.into_iter().map(|e| {
+        let mut history: Vec<crate::traits::Message> = history_entities.into_iter().map(|e| {
             crate::traits::Message {
                 role: match e.role.as_str() {
                     "user" => crate::traits::Role::User,
@@ -169,10 +169,29 @@ impl AgentService for AgentServiceImpl {
                     _ => crate::traits::Role::User,
                 },
                 content: Some(e.content),
-                tool_calls: e.tool_calls.map(|v| serde_json::from_value(v).unwrap_or_default()),
-                tool_call_id: None,
+                tool_calls: if e.role == "tool" {
+                    None
+                } else {
+                    e.tool_calls.as_ref().map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
+                },
+                tool_call_id: if e.role == "tool" {
+                    e.tool_calls.as_ref()
+                        .and_then(|v| v.get("tool_call_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                },
             }
         }).collect();
+
+        // Remove the last message if it matches the current input to avoid duplication
+        // because AgentRuntime::chat will append the current input to the history
+        if let Some(last) = history.last() {
+             if matches!(last.role, crate::traits::Role::User) && last.content.as_deref() == Some(last_message.content.as_str()) {
+                 history.pop();
+             }
+        }
 
         // Create Agent for user
         let user_val = self.auth_service.get_user_by_id(&user_id_str).await.map_err(|e| Error::Internal(e.to_string()))?;
@@ -210,27 +229,96 @@ impl AgentService for AgentServiceImpl {
 
         // Map AgentEvent to SSE Event
         let session_id_str = session_id.to_string();
+        let db = self.db.clone();
+        let session_id_uuid = session_id;
+
         let sse_stream = stream.map(move |result| {
             match result {
                 Ok(event) => {
                     match event {
                         AgentEvent::Thought(thought) => {
-                             append_chat_log(&session_id_str, format!("THOUGHT: {}", thought));
+                             // Save thought to DB
+                             let thought_clone = thought.clone();
+                             let db_clone = db.clone();
+                             let sid = session_id_uuid;
+                             tokio::spawn(async move {
+                                 let _ = sqlx::query("INSERT INTO agent.chat_messages (id, session_id, role, content, tool_calls) VALUES ($1, $2, $3, $4, $5)")
+                                     .bind(Uuid::new_v4())
+                                     .bind(sid)
+                                     .bind("assistant")
+                                     .bind(&thought_clone)
+                                     .bind(Option::<serde_json::Value>::None)
+                                     .execute(&db_clone)
+                                     .await;
+                             });
+
                              let data = serde_json::json!({ "type": "thought", "content": thought }).to_string();
                              Ok(Event::default().event("thought").data(data))
                         },
                         AgentEvent::ToolCall(call) => {
-                             append_chat_log(&session_id_str, format!("TOOL_CALL: {} ({})", call.function.name, call.function.arguments));
+                             // Save tool call to DB
+                             let call_clone = call.clone();
+                             let db_clone = db.clone();
+                             let sid = session_id_uuid;
+                             tokio::spawn(async move {
+                                 let tool_calls_json = serde_json::to_value(vec![call_clone]).ok();
+                                 let _ = sqlx::query("INSERT INTO agent.chat_messages (id, session_id, role, content, tool_calls) VALUES ($1, $2, $3, $4, $5)")
+                                     .bind(Uuid::new_v4())
+                                     .bind(sid)
+                                     .bind("assistant")
+                                     .bind("")
+                                     .bind(tool_calls_json)
+                                     .execute(&db_clone)
+                                     .await;
+                             });
+
                              let data = serde_json::json!({ "type": "tool_call", "content": { "id": call.id, "function": call.function } }).to_string();
                              Ok(Event::default().event("tool_call").data(data))
                         },
                         AgentEvent::ToolResult { id, result } => {
-                             append_chat_log(&session_id_str, format!("TOOL_RESULT: {} -> {}", id, result));
+                             // Save tool result to DB
+                             let result_clone = result.clone();
+                             let db_clone = db.clone();
+                             let sid = session_id_uuid;
+                             let tool_call_id = id.clone();
+                             // Note: We don't have tool_call_id column, so we use tool_calls column to store it as json.
+                             tokio::spawn(async move {
+                                 let _ = sqlx::query("INSERT INTO agent.chat_messages (id, session_id, role, content, tool_calls) VALUES ($1, $2, $3, $4, $5)")
+                                     .bind(Uuid::new_v4())
+                                     .bind(sid)
+                                     .bind("tool")
+                                     .bind(&result_clone)
+                                     .bind(serde_json::json!({ "tool_call_id": tool_call_id }))
+                                     .execute(&db_clone)
+                                     .await;
+                             });
+
                              let data = serde_json::json!({ "type": "tool_result", "content": { "id": id, "result": result } }).to_string();
                              Ok(Event::default().event("tool_result").data(data))
                         },
                         AgentEvent::Answer(answer) => {
-                             append_chat_log(&session_id_str, format!("ANSWER: {}", answer));
+                             // Save assistant answer to DB
+                             let ans_clone = answer.clone();
+                             let db_clone = db.clone();
+                             let sid = session_id_uuid;
+                             
+                             tokio::spawn(async move {
+                                 let _ = sqlx::query("INSERT INTO agent.chat_messages (id, session_id, role, content, tool_calls) VALUES ($1, $2, $3, $4, $5)")
+                                     .bind(Uuid::new_v4())
+                                     .bind(sid)
+                                     .bind("assistant")
+                                     .bind(&ans_clone)
+                                     .bind(Option::<serde_json::Value>::None)
+                                     .execute(&db_clone)
+                                     .await;
+
+                                 let _ = sqlx::query("UPDATE agent.chat_sessions SET updated_at = NOW(), last_message = $1 WHERE id = $2")
+                                     .bind(&ans_clone)
+                                     .bind(sid)
+                                     .execute(&db_clone)
+                                     .await;
+                             });
+
                              let data = serde_json::json!({ "type": "answer", "content": answer }).to_string();
                              Ok(Event::default().event("message").data(data))
                         }
@@ -264,8 +352,16 @@ impl AgentService for AgentServiceImpl {
     }
 
     async fn get_session_messages(&self, session_id: Uuid) -> Result<Vec<ChatMessageEntity>> {
+        // Industry standard: Sliding Window. 
+        // Fetch only the most recent messages to maintain context without exceeding token limits.
+        // We get the last 50 messages ordered by time, then re-sort them chronologically.
         let messages = sqlx::query_as::<_, ChatMessageEntity>(
-            "SELECT * FROM agent.chat_messages WHERE session_id = $1 ORDER BY created_at ASC"
+            "SELECT * FROM (
+                SELECT * FROM agent.chat_messages 
+                WHERE session_id = $1 
+                ORDER BY created_at DESC 
+                LIMIT 50
+            ) sub ORDER BY created_at ASC"
         )
         .bind(session_id)
         .fetch_all(&self.db)

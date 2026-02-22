@@ -13,12 +13,16 @@ impl Command for CatCommand {
         "cat"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
-        if args.is_empty() {
+    async fn execute(&self, service: &TerminalService, args: &[&str], stdin: Option<&str>) -> Result<(String, String, i32)> {
+        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        if targets.is_empty() {
+            if let Some(input) = stdin {
+                return Ok((input.to_string(), "".to_string(), 0));
+            }
             return Ok(("".to_string(), "cat: missing operand".to_string(), 1));
         }
 
-        let target = args[0];
+        let target = targets[0];
         let path = service.resolve_path(target);
         
         let storage_path;
@@ -58,12 +62,13 @@ impl Command for MkdirCommand {
         "mkdir"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
-        if args.is_empty() {
+    async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
+        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        if targets.is_empty() {
             return Ok(("".to_string(), "mkdir: missing operand".to_string(), 1));
         }
 
-        let target = args[0];
+        let target = targets[0];
         let path = service.resolve_path(target);
         
         let storage_path;
@@ -109,12 +114,13 @@ impl Command for RmCommand {
         "rm"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
-        if args.is_empty() {
+    async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
+        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        if targets.is_empty() {
             return Ok(("".to_string(), "rm: missing operand".to_string(), 1));
         }
 
-        let target = args[0];
+        let target = targets[0];
         let path = service.resolve_path(target);
         
         let storage_path;
@@ -150,13 +156,14 @@ impl Command for MvCommand {
         "mv"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
-        if args.len() < 2 {
+    async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
+        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        if targets.len() < 2 {
             return Ok(("".to_string(), "mv: missing operand".to_string(), 1));
         }
 
-        let source = args[0];
-        let dest = args[1];
+        let source = targets[0];
+        let dest = targets[1];
         
         // Resolve source
         let source_path = service.resolve_path(source);
@@ -212,11 +219,12 @@ impl Command for TouchCommand {
         "touch"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
-        if args.is_empty() {
+    async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
+        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        if targets.is_empty() {
             return Ok(("".to_string(), "touch: missing operand".to_string(), 1));
         }
-        let target = args[0];
+        let target = targets[0];
         let path = service.resolve_path(target);
         
         let storage_path;
@@ -272,12 +280,13 @@ impl Command for CpCommand {
         "cp"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
-        if args.len() < 2 {
+    async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
+        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        if targets.len() < 2 {
             return Ok(("".to_string(), "cp: missing operand".to_string(), 1));
         }
-        let source = args[0];
-        let dest = args[1];
+        let source = targets[0];
+        let dest = targets[1];
         let source_path = service.resolve_path(source);
         let dest_path = service.resolve_path(dest);
         

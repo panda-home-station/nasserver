@@ -93,6 +93,7 @@ struct OpenAIChoice {
 struct OpenAIMessageResponse {
     role: String,
     content: Option<String>,
+    reasoning: Option<String>,
     tool_calls: Option<Vec<OpenAIToolCall>>,
 }
 
@@ -220,8 +221,19 @@ impl Provider for OpenAIProvider {
                 .collect()
         });
 
+        // Handle reasoning models: If content is empty but reasoning is present, use reasoning as content
+        let content = if let Some(reasoning) = &choice.message.reasoning {
+            if choice.message.content.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                Some(format!("(Reasoning: {})\n", reasoning))
+            } else {
+                choice.message.content.clone()
+            }
+        } else {
+            choice.message.content.clone()
+        };
+
         Ok(CompletionResponse {
-            content: choice.message.content.clone(),
+            content,
             tool_calls,
         })
     }

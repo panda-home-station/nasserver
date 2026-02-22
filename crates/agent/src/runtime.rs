@@ -68,6 +68,8 @@ impl AgentRuntime {
     }
 }
 
+use crate::utils::append_chat_log;
+
 #[async_trait]
 impl Agent for AgentRuntime {
     #[instrument(skip(self))]
@@ -136,8 +138,10 @@ impl Agent for AgentRuntime {
                 // Emit content if any
                 if let Some(content) = &response.content {
                     if response.tool_calls.is_none() || response.tool_calls.as_ref().unwrap().is_empty() {
+                        append_chat_log(&session_id, format!("ANSWER: {}", content));
                         let _ = tx.send(Ok(AgentEvent::Answer(content.clone()))).await;
                     } else {
+                         append_chat_log(&session_id, format!("THOUGHT: {}", content));
                          let _ = tx.send(Ok(AgentEvent::Thought(content.clone()))).await;
                     }
                 }
@@ -163,6 +167,8 @@ impl Agent for AgentRuntime {
                             Ok(s) => s,
                             Err(e) => format!("Error: {}", e),
                         };
+
+                        append_chat_log(&session_id, format!("TOOL_CALL: {} ({}) -> RESULT: {}", tool_call.function.name, tool_call.function.arguments, content));
 
                         // Emit ToolResult event
                         let _ = tx.send(Ok(AgentEvent::ToolResult {

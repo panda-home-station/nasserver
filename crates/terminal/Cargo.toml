@@ -12,3 +12,4 @@ tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 domain = { path = "../domain" }
 bytes = "1.5"
+shlex = "1.3"

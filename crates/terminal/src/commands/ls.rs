@@ -12,7 +12,7 @@ impl Command for LsCommand {
         "ls"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
+    async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
         let mut target = ".";
         let mut long_format = false;
         let mut one_per_line = false;

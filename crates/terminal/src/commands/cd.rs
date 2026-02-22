@@ -11,8 +11,10 @@ impl Command for CdCommand {
         "cd"
     }
 
-    async fn execute(&self, service: &TerminalService, args: &[&str]) -> Result<(String, String, i32)> {
-        let target = args.first().unwrap_or(&"~");
+    async fn execute(&self, service: &TerminalService, args: &[&str], _stdin: Option<&str>) -> Result<(String, String, i32)> {
+        let targets: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let default = "~";
+        let target = targets.first().unwrap_or(&default);
         let path = service.resolve_path(target);
         
         if path == "/" || path == "/AppData" || path == "/User" {
