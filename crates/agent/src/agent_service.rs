@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::search::SearchService;
 use crate::runtime::AgentRuntime;
 use crate::providers::openai::OpenAIProvider;
-use crate::tools::{ListFilesTool, ReadFileTool, SystemInfoTool, TerminalTool};
+use crate::tools::TerminalTool;
 use crate::sandbox::NoopSandbox;
 use crate::traits::{Agent, AgentConfig, AgentEvent, Tool, Sandbox, Provider};
 use terminal::TerminalService;
@@ -190,9 +190,6 @@ impl AgentService for AgentServiceImpl {
         let terminal = Arc::new(TerminalTool::new(terminal_service));
 
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(ListFilesTool),
-            Arc::new(ReadFileTool),
-            Arc::new(SystemInfoTool::new(self.system_service.clone())),
             terminal.clone(),
         ];
         

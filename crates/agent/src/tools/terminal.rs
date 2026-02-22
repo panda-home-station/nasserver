@@ -35,7 +35,7 @@ impl Tool for TerminalTool {
 
     fn description(&self) -> &str {
         "Execute a shell command. \
-        Use 'environment: host' for NAS file management, system checks (ls, cd, cp, mv). \
+        Use 'environment: host' for NAS file management, system checks (ls, cd, cp, mv, cat, mkdir, rm, sysinfo). \
         Use 'environment: user' for running user scripts, python, npm, and untrusted code. \
         Supports stateful 'cd' for host environment."
     }
