@@ -13,10 +13,8 @@ use domain::dtos::docs::DocsListQuery;
 
 use crate::commands::{
     Command, 
-    ls::LsCommand, 
     cd::CdCommand,
     sysinfo::SysInfoCommand,
-    fs::{CatCommand, MkdirCommand, RmCommand, MvCommand, TouchCommand, CpCommand},
     echo::EchoCommand,
     container::DockerCommand,
     app::AppCommand,
@@ -26,7 +24,7 @@ use crate::commands::{
     blobfs::BlobFsCommand,
     agent::AgentCommand,
 };
-use crate::js::runtime::JsRuntime;
+use crate::runtime::vm::JsRuntime;
 
 #[derive(Clone)]
 pub struct TerminalService {
@@ -286,29 +284,35 @@ impl TerminalService {
             let cmd_name = &args[0];
             let cmd_args: Vec<&str> = args.iter().skip(1).map(|s| s.as_str()).collect();
 
-            // Try Lisp Eval if input starts with (
-            if cmd_name.starts_with('(') && args.len() == 1 {
-                 // The whole command might be a lisp expression
-                 // But wait, args[0] is just the first token. shlex split it.
-                 // If user typed `(print "hello")`, shlex might split it weirdly or keep it together depending on quotes.
-                 // Let's rely on the raw command string for Lisp eval?
-                 // But we are in a pipeline loop.
-                 // If the command is just one segment and starts with (, let's try to parse/eval it.
-                 // For now, let's just check if cmd_name starts with (
-                 // Or we can add a specific `lisp` command.
-            }
+            // Try built-in JS commands first
+            let js_result = if let Some(script) = crate::userland::get_script(cmd_name) {
+                let args_vec: Vec<String> = cmd_args.iter().map(|s| s.to_string()).collect();
+                let script = script.to_string();
+                let service = Arc::new(self.clone());
+                Some(tokio::task::spawn_blocking(move || -> Result<String> {
+                    JsRuntime::execute(&script, service, args_vec)
+                }).await.unwrap())
+            } else {
+                None
+            };
 
-            let result = match cmd_name.as_str() {
-                "cd" => CdCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "ls" => LsCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "cat" => CatCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "sysinfo" => SysInfoCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "mkdir" => MkdirCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "rm" => RmCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "mv" => MvCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "touch" => TouchCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "cp" => CpCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "pwd" => {
+            let result = if let Some(res) = js_result {
+                match res {
+                    Ok(output) => Ok((output, "".to_string(), 0)),
+                    Err(e) => Ok(("".to_string(), format!("Error: {}\n", e), 1)),
+                }
+            } else {
+                match cmd_name.as_str() {
+                    "cd" => CdCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                    // "ls" => LsCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
+                    // "cat" => CatCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
+                    "sysinfo" => SysInfoCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                    // "mkdir" => MkdirCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
+                    // "rm" => RmCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
+                    // "mv" => MvCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
+                    // "touch" => TouchCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
+                    // "cp" => CpCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
+                    "pwd" => {
                     let cwd = self.get_user_cwd();
                     Ok((format!("{}\n", cwd), "".to_string(), 0))
                 },
@@ -378,7 +382,7 @@ impl TerminalService {
                         Ok(("".to_string(), format!("{}: command not found", cmd_name), 127))
                     }
                 }
-            };
+            }};
 
             let (stdout, stderr, code) = result?;
 
@@ -460,7 +464,10 @@ impl TerminalService {
         };
 
         if is_command {
-            let cmds = vec!["ls", "cd", "mkdir", "rm", "touch", "cp", "mv", "cat", "pwd", "whoami", "sysinfo", "clear", "echo"];
+            let mut cmds = vec!["cd", "pwd", "whoami", "sysinfo", "clear", "echo", "js", "docker", "app", "dl", "task", "auth", "blobfs", "agent", "help"];
+            cmds.extend_from_slice(crate::userland::COMMANDS);
+            cmds.sort();
+            cmds.dedup();
             return cmds.into_iter()
                 .filter(|c| c.starts_with(prefix))
                 .map(|c| c.to_string())

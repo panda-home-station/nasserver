@@ -1,8 +1,10 @@
 pub mod error;
 pub mod sandbox;
 pub mod service;
+pub mod userland;
+pub mod sys;
 pub mod commands;
-pub mod js;
+pub mod runtime;
 
 pub use error::{TerminalError, Result};
 pub use sandbox::{Sandbox, NoopSandbox};

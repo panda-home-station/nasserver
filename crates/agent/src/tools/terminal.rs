@@ -2,7 +2,7 @@ use crate::traits::{AgentError, Sandbox, Tool, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use terminal::TerminalService;
+use kernel::TerminalService;
 
 /// A tool that executes shell commands using the TerminalService
 #[derive(Clone)]

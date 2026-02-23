@@ -12,7 +12,7 @@ use crate::providers::openai::OpenAIProvider;
 use crate::tools::TerminalTool;
 use crate::sandbox::NoopSandbox;
 use crate::traits::{Agent, AgentConfig, AgentEvent, Tool, Sandbox, Provider};
-use terminal::TerminalService;
+use kernel::TerminalService;
 use crate::utils::append_chat_log;
 
 use sqlx::{Pool, Postgres};

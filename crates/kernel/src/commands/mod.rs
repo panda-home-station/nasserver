@@ -2,8 +2,6 @@ use crate::service::TerminalService;
 use crate::error::Result;
 use async_trait::async_trait;
 
-pub mod fs;
-pub mod ls;
 pub mod cd;
 pub mod sysinfo;
 pub mod echo;

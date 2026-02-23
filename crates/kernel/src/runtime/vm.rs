@@ -5,6 +5,7 @@ use boa_engine::property::Attribute;
 use crate::service::TerminalService;
 use crate::error::{Result, TerminalError};
 use domain::container::ContainerService;
+use crate::sys::{fs::create_fs_api, process::create_process_api};
 
 pub struct JsRuntime;
 
@@ -69,10 +70,23 @@ impl JsRuntime {
         // Register 'sys' object
         // Create docker_api first to avoid double borrow
         let docker_api = create_docker_api(&mut context, service.container_service.clone());
+        let fs_api = create_fs_api(&mut context, service.clone());
+        let process_api = create_process_api(&mut context, service.clone());
+
         let sys_obj = ObjectInitializer::new(&mut context)
             .property(
                 JsString::from("docker"),
                 docker_api,
+                Attribute::all()
+            )
+            .property(
+                JsString::from("fs"),
+                fs_api,
+                Attribute::all()
+            )
+            .property(
+                JsString::from("process"),
+                process_api,
                 Attribute::all()
             )
             .build();
