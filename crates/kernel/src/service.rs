@@ -54,10 +54,10 @@ impl TerminalService {
         agent_service: Option<Arc<dyn AgentService>>,
         current_user: String,
     ) -> Self {
-        Self {
+        let service = Self {
             user_cwd: Arc::new(Mutex::new(format!("/User/{}", current_user))),
             current_user,
-            storage_service,
+            storage_service: storage_service.clone(),
             auth_service,
             system_service,
             downloader_service,
@@ -66,7 +66,15 @@ impl TerminalService {
             task_service,
             blobfs_service,
             agent_service,
-        }
+        };
+
+        // Trigger userland installation in background
+        let storage = storage_service.clone();
+        tokio::spawn(async move {
+            let _ = crate::userland::install_userland(storage).await;
+        });
+
+        service
     }
 
     pub fn with_cwd(self, cwd: String) -> Self {
@@ -331,30 +339,72 @@ impl TerminalService {
                     Ok((Self::get_help_text(), "".to_string(), 0))
                 },
                 "js" => {
-                    let code = cmd_args.join(" ");
+                    if cmd_args.is_empty() {
+                         return Ok(("".to_string(), "Usage: js <file> [args...] or js <code...>".to_string(), 1));
+                    }
+
+                    // Try to treat first arg as a file
+                    let target = cmd_args[0];
+                    let potential_path = self.resolve_path(target);
+                    let file_content = if let Ok(p) = self.storage_service.get_file_path(&self.current_user, &potential_path).await {
+                        if tokio::fs::metadata(&p).await.is_ok() {
+                             tokio::fs::read_to_string(&p).await.ok()
+                        } else {
+                             None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let (code, args) = if let Some(content) = file_content {
+                        (content, cmd_args.iter().skip(1).map(|s| s.to_string()).collect())
+                    } else {
+                        (cmd_args.join(" "), vec![])
+                    };
+
                     // Spawn blocking task to execute JS
                     let service = Arc::new(self.clone());
                     match tokio::task::spawn_blocking(move || -> Result<String> {
-                        JsRuntime::execute(&code, service, vec![])
+                        JsRuntime::execute(&code, service, args)
                     }).await.unwrap() {
                         Ok(output) => Ok((output, "".to_string(), 0)),
                         Err(e) => Ok(("".to_string(), format!("JS Error: {}\n", e), 1)),
                     }
                 },
                 _ => {
-                    if cmd_name.starts_with("./") || cmd_name.starts_with("/") {
-                        let path = self.resolve_path(cmd_name);
-                        
+                    let mut final_path = None;
+
+                    // 1. Check if it is a path
+                    if cmd_name.starts_with("./") || cmd_name.starts_with("/") || cmd_name.starts_with("~") {
+                        final_path = Some(self.resolve_path(cmd_name));
+                    } else {
+                        // 2. Check PATH (currently only /bin)
+                        let bin_path = format!("/bin/{}", cmd_name);
+                        if let Ok(p) = self.storage_service.get_file_path(&self.current_user, &bin_path).await {
+                             if tokio::fs::metadata(&p).await.is_ok() {
+                                 final_path = Some(bin_path);
+                             }
+                        }
+                    }
+
+                    if let Some(path) = final_path {
                         // Check permissions and resolve to storage path
                         let (storage_path, username) = if path.starts_with("/AppData") {
                             (path.clone(), self.current_user.clone())
                         } else if path.starts_with("/bin") {
+                            // /bin is owned by system/admin usually, but storage service handles mapping
+                            // We use current_user for access check?
+                            // get_file_path usage above suggests we use current_user.
+                            // But here we need to know who "owns" the file for reading?
+                            // StorageService.get_file_path uses the username to resolve User_Data
+                            // BUT for /bin it ignores username and uses vol1/bin.
                             (path.clone(), self.current_user.clone())
                         } else if path.starts_with(&format!("/User/{}", self.current_user)) {
                             let rel = path.trim_start_matches(&format!("/User/{}", self.current_user));
                             let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
                             (sp, self.current_user.clone())
                         } else {
+                             // If path is absolute but not in allowed paths
                             return Ok(("".to_string(), format!("{}: Permission denied", cmd_name), 126));
                         };
 

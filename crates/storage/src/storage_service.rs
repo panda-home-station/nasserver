@@ -195,7 +195,7 @@ impl StorageService for StorageServiceImpl {
         let parent = path_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
         let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
-        if full_path.starts_with("/AppData") {
+        if full_path.starts_with("/AppData") || full_path.starts_with("/bin") {
             let physical_path = self.resolve_physical_path(username, &full_path).await?;
             fs::create_dir_all(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else {

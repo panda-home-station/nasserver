@@ -20,3 +20,23 @@ pub fn get_script(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+pub async fn install_userland(storage: std::sync::Arc<dyn domain::storage::StorageService>) -> crate::error::Result<()> {
+    // Ensure /bin exists
+    // We use "admin" as the user for system operations
+    let _ = storage.mkdir("admin", domain::dtos::docs::DocsMkdirReq { path: "/bin".to_string() }).await;
+
+    for cmd in COMMANDS {
+        if let Some(script) = get_script(cmd) {
+            // Check if file exists to avoid overwriting (or maybe we should overwrite to update?)
+            // For now, let's overwrite to ensure latest version
+            let _ = storage.save_file(
+                "admin", 
+                "/bin", 
+                cmd, 
+                bytes::Bytes::from(script.as_bytes().to_vec())
+            ).await;
+        }
+    }
+    Ok(())
+}
