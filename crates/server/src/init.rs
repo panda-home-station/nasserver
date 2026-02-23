@@ -38,13 +38,6 @@ pub async fn init() -> AppState {
     let blob_fs_service = Arc::new(BlobFsServiceImpl::new(storage_service.clone(), format!("{}/vol1", storage_path)));
     let auth_service = Arc::new(AuthServiceImpl::new(pools.sys.clone(), jwt_secret.clone(), storage_path.clone(), blob_fs_service.clone()));
     let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
-    let agent_service = Arc::new(AgentServiceImpl::new(
-        pools.agent.clone(),
-        system_service.clone(),
-        storage_service.clone(),
-        auth_service.clone(),
-        format!("{}/vol1", storage_path)
-    ));
     let task_service = Arc::new(TaskServiceImpl::new(pools.storage.clone()));
 
     let torrent_dir = format!("{}/torrents", storage_path);
@@ -58,6 +51,22 @@ pub async fn init() -> AppState {
         storage_path.clone(),
         session.clone(),
     ));
+
+    let agent_service = Arc::new(AgentServiceImpl::new(
+        pools.agent.clone(),
+        system_service.clone(),
+        storage_service.clone(),
+        auth_service.clone(),
+        downloader_service.clone(),
+        container_service.clone(),
+        app_manager.clone(),
+        task_service.clone(),
+        blob_fs_service.clone(),
+        format!("{}/vol1", storage_path)
+    ));
+
+    let agent_service_dyn: Arc<dyn agent::AgentService> = agent_service.clone();
+    agent_service.set_self_ref(Arc::downgrade(&agent_service_dyn));
 
     AppState {
         db: pools.sys,

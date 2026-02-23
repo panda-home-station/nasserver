@@ -1,4 +1,4 @@
-use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep, ChatSession, ChatMessageEntity}, system::SystemService, storage::StorageService, auth::AuthService};
+use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep, ChatMessageEntity, ChatSession}, system::SystemService, storage::StorageService, auth::AuthService, downloader::DownloaderService, container::{ContainerService, AppManager}, task::TaskService, blobfs::BlobFsService};
 use async_trait::async_trait;
 use axum::response::sse::Event;
 use futures_util::stream::{BoxStream, StreamExt};
@@ -24,9 +24,15 @@ pub struct AgentServiceImpl {
     storage_service: Arc<dyn StorageService>,
     auth_service: Arc<dyn AuthService>,
     system_service: Arc<dyn SystemService>,
+    downloader_service: Arc<dyn DownloaderService>,
+    container_service: Arc<dyn ContainerService>,
+    app_manager: Arc<dyn AppManager>,
+    task_service: Arc<dyn TaskService>,
+    blobfs_service: Arc<dyn BlobFsService>,
     provider: Arc<dyn Provider>,
     sandbox: Arc<dyn Sandbox>,
     active_cwds: Arc<Mutex<HashMap<String, Arc<Mutex<String>>>>>,
+    self_ref: Mutex<Option<std::sync::Weak<dyn AgentService>>>,
 }
 
 impl AgentServiceImpl {
@@ -35,6 +41,11 @@ impl AgentServiceImpl {
         system_service: Arc<dyn SystemService>,
         storage_service: Arc<dyn StorageService>,
         auth_service: Arc<dyn AuthService>,
+        downloader_service: Arc<dyn DownloaderService>,
+        container_service: Arc<dyn ContainerService>,
+        app_manager: Arc<dyn AppManager>,
+        task_service: Arc<dyn TaskService>,
+        blobfs_service: Arc<dyn BlobFsService>,
         _mount_root: String
     ) -> Self {
         // Initialize Agent
@@ -62,10 +73,20 @@ impl AgentServiceImpl {
             storage_service,
             auth_service,
             system_service,
+            downloader_service,
+            container_service,
+            app_manager,
+            task_service,
+            blobfs_service,
             provider,
             sandbox,
             active_cwds: Arc::new(Mutex::new(HashMap::new())),
+            self_ref: Mutex::new(None),
         }
+    }
+
+    pub fn set_self_ref(&self, self_ref: std::sync::Weak<dyn AgentService>) {
+        *self.self_ref.lock().unwrap() = Some(self_ref);
     }
 }
 
@@ -204,10 +225,21 @@ impl AgentService for AgentServiceImpl {
                 .clone()
         };
 
+        let agent_service_ref = {
+            let guard = self.self_ref.lock().unwrap();
+            guard.as_ref().and_then(|w| w.upgrade())
+        };
+
         let terminal_service = Arc::new(TerminalService::new(
             self.storage_service.clone(),
             self.auth_service.clone(),
             self.system_service.clone(),
+            self.downloader_service.clone(),
+            self.container_service.clone(),
+            self.app_manager.clone(),
+            self.task_service.clone(),
+            self.blobfs_service.clone(),
+            agent_service_ref,
             username
         ).with_cwd_ref(cwd_ref));
         let terminal = Arc::new(TerminalTool::new(terminal_service));
@@ -435,10 +467,21 @@ impl AgentService for AgentServiceImpl {
                 .clone()
         };
 
+        let agent_service_ref = {
+            let guard = self.self_ref.lock().unwrap();
+            guard.as_ref().and_then(|w| w.upgrade())
+        };
+
         let terminal_service = Arc::new(TerminalService::new(
             self.storage_service.clone(),
             self.auth_service.clone(),
             self.system_service.clone(),
+            self.downloader_service.clone(),
+            self.container_service.clone(),
+            self.app_manager.clone(),
+            self.task_service.clone(),
+            self.blobfs_service.clone(),
+            agent_service_ref,
             username
         ).with_cwd_ref(cwd_ref));
         
@@ -470,10 +513,21 @@ impl AgentService for AgentServiceImpl {
         // Create a temporary TerminalService or reuse one if cached
         // Note: For completion, we need the current CWD which is stored in active_cwds
         
+        let agent_service_ref = {
+            let guard = self.self_ref.lock().unwrap();
+            guard.as_ref().and_then(|w| w.upgrade())
+        };
+
         let mut terminal_service = TerminalService::new(
             self.storage_service.clone(),
             self.auth_service.clone(),
             self.system_service.clone(),
+            self.downloader_service.clone(),
+            self.container_service.clone(),
+            self.app_manager.clone(),
+            self.task_service.clone(),
+            self.blobfs_service.clone(),
+            agent_service_ref,
             username.clone(),
         );
 

@@ -6,6 +6,8 @@ pub enum TerminalError {
     Io(#[from] std::io::Error),
     #[error("Execution error: {0}")]
     Execution(String),
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, TerminalError>;

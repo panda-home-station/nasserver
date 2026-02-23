@@ -4,6 +4,11 @@ use crate::error::Result;
 use domain::storage::StorageService;
 use domain::auth::AuthService;
 use domain::system::SystemService;
+use domain::downloader::DownloaderService;
+use domain::container::{ContainerService, AppManager};
+use domain::task::TaskService;
+use domain::blobfs::BlobFsService;
+use domain::agent::AgentService;
 use domain::dtos::docs::DocsListQuery;
 
 use crate::commands::{
@@ -13,15 +18,29 @@ use crate::commands::{
     sysinfo::SysInfoCommand,
     fs::{CatCommand, MkdirCommand, RmCommand, MvCommand, TouchCommand, CpCommand},
     echo::EchoCommand,
+    container::DockerCommand,
+    app::AppCommand,
+    download::DownloadCommand,
+    task::TaskCommand,
+    auth::AuthCommand,
+    blobfs::BlobFsCommand,
+    agent::AgentCommand,
 };
+use crate::js::runtime::JsRuntime;
 
 #[derive(Clone)]
 pub struct TerminalService {
     pub(crate) user_cwd: Arc<Mutex<String>>,
     pub(crate) current_user: String,
     pub(crate) storage_service: Arc<dyn StorageService>,
-    pub(crate) _auth_service: Arc<dyn AuthService>,
+    pub(crate) auth_service: Arc<dyn AuthService>,
     pub(crate) system_service: Arc<dyn SystemService>,
+    pub(crate) downloader_service: Arc<dyn DownloaderService>,
+    pub(crate) container_service: Arc<dyn ContainerService>,
+    pub(crate) app_manager: Arc<dyn AppManager>,
+    pub(crate) task_service: Arc<dyn TaskService>,
+    pub(crate) blobfs_service: Arc<dyn BlobFsService>,
+    pub(crate) agent_service: Option<Arc<dyn AgentService>>,
 }
 
 impl TerminalService {
@@ -29,14 +48,26 @@ impl TerminalService {
         storage_service: Arc<dyn StorageService>,
         auth_service: Arc<dyn AuthService>,
         system_service: Arc<dyn SystemService>,
+        downloader_service: Arc<dyn DownloaderService>,
+        container_service: Arc<dyn ContainerService>,
+        app_manager: Arc<dyn AppManager>,
+        task_service: Arc<dyn TaskService>,
+        blobfs_service: Arc<dyn BlobFsService>,
+        agent_service: Option<Arc<dyn AgentService>>,
         current_user: String,
     ) -> Self {
         Self {
             user_cwd: Arc::new(Mutex::new(format!("/User/{}", current_user))),
             current_user,
             storage_service,
-            _auth_service: auth_service,
+            auth_service,
             system_service,
+            downloader_service,
+            container_service,
+            app_manager,
+            task_service,
+            blobfs_service,
+            agent_service,
         }
     }
 
@@ -98,7 +129,7 @@ impl TerminalService {
     }
 
     pub fn get_available_commands() -> Vec<&'static str> {
-        vec!["ls", "cd", "cat", "sysinfo", "mkdir", "rm", "mv", "touch", "cp", "pwd", "whoami", "echo", "help"]
+        vec!["ls", "cd", "cat", "sysinfo", "mkdir", "rm", "mv", "touch", "cp", "pwd", "whoami", "echo", "help", "docker", "app", "dl", "task", "auth", "blobfs", "agent"]
     }
 
     pub fn get_help_text() -> String {
@@ -175,9 +206,27 @@ impl TerminalService {
         }
 
         // 2. Tokenize with shlex
-        let tokens = match shlex::split(&processed_command) {
-            Some(t) => t,
-            None => return Ok(("".to_string(), "Syntax error: unmatched quote".to_string(), 2)),
+        // Special case: if command starts with "js ", we treat the rest of the line as raw JS code.
+        // This is to support unquoted JS execution like `js print("hello")`.
+        // We bypass shlex for "js" command to preserve quotes and structure.
+        let is_js_command = {
+            let trimmed = processed_command.trim();
+            trimmed == "js" || trimmed.starts_with("js ") || trimmed.starts_with("js\t")
+        };
+
+        let tokens = if is_js_command {
+            let trimmed = processed_command.trim();
+            if let Some(idx) = trimmed.find(char::is_whitespace) {
+                let (cmd, args) = trimmed.split_at(idx);
+                vec![cmd.to_string(), args.trim().to_string()]
+            } else {
+                vec![trimmed.to_string()]
+            }
+        } else {
+            match shlex::split(&processed_command) {
+                Some(t) => t,
+                None => return Ok(("".to_string(), "Syntax error: unmatched quote".to_string(), 2)),
+            }
         };
 
         // 3. Build Pipeline
@@ -237,6 +286,18 @@ impl TerminalService {
             let cmd_name = &args[0];
             let cmd_args: Vec<&str> = args.iter().skip(1).map(|s| s.as_str()).collect();
 
+            // Try Lisp Eval if input starts with (
+            if cmd_name.starts_with('(') && args.len() == 1 {
+                 // The whole command might be a lisp expression
+                 // But wait, args[0] is just the first token. shlex split it.
+                 // If user typed `(print "hello")`, shlex might split it weirdly or keep it together depending on quotes.
+                 // Let's rely on the raw command string for Lisp eval?
+                 // But we are in a pipeline loop.
+                 // If the command is just one segment and starts with (, let's try to parse/eval it.
+                 // For now, let's just check if cmd_name starts with (
+                 // Or we can add a specific `lisp` command.
+            }
+
             let result = match cmd_name.as_str() {
                 "cd" => CdCommand.execute(self, &cmd_args, current_input.as_deref()).await,
                 "ls" => LsCommand.execute(self, &cmd_args, current_input.as_deref()).await,
@@ -255,11 +316,67 @@ impl TerminalService {
                     Ok((format!("{}\n", self.current_user), "".to_string(), 0))
                 },
                 "echo" => EchoCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "docker" => DockerCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "app" => AppCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "dl" => DownloadCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "task" => TaskCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "auth" => AuthCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "blobfs" => BlobFsCommand.execute(self, &cmd_args, current_input.as_deref()).await,
+                "agent" => AgentCommand.execute(self, &cmd_args, current_input.as_deref()).await,
                 "help" => {
                     Ok((Self::get_help_text(), "".to_string(), 0))
                 },
+                "js" => {
+                    let code = cmd_args.join(" ");
+                    // Spawn blocking task to execute JS
+                    let service = Arc::new(self.clone());
+                    match tokio::task::spawn_blocking(move || -> Result<String> {
+                        JsRuntime::execute(&code, service, vec![])
+                    }).await.unwrap() {
+                        Ok(output) => Ok((output, "".to_string(), 0)),
+                        Err(e) => Ok(("".to_string(), format!("JS Error: {}\n", e), 1)),
+                    }
+                },
                 _ => {
-                    Ok(("".to_string(), format!("{}: command not found", cmd_name), 127))
+                    if cmd_name.starts_with("./") || cmd_name.starts_with("/") {
+                        let path = self.resolve_path(cmd_name);
+                        
+                        // Check permissions and resolve to storage path
+                        let (storage_path, username) = if path.starts_with("/AppData") {
+                            (path.clone(), self.current_user.clone())
+                        } else if path.starts_with("/bin") {
+                            (path.clone(), self.current_user.clone())
+                        } else if path.starts_with(&format!("/User/{}", self.current_user)) {
+                            let rel = path.trim_start_matches(&format!("/User/{}", self.current_user));
+                            let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
+                            (sp, self.current_user.clone())
+                        } else {
+                            return Ok(("".to_string(), format!("{}: Permission denied", cmd_name), 126));
+                        };
+
+                        // Try to read file
+                        match self.storage_service.get_file_path(&username, &storage_path).await {
+                            Ok(p) => {
+                                match tokio::fs::read_to_string(&p).await {
+                                    Ok(content) => {
+                                        let args: Vec<String> = cmd_args.iter().map(|s| s.to_string()).collect();
+                                        let service = Arc::new(self.clone());
+                                        // Spawn blocking task to execute JS
+                                        match tokio::task::spawn_blocking(move || -> Result<String> {
+                                            JsRuntime::execute(&content, service, args)
+                                        }).await.unwrap() {
+                                            Ok(output) => Ok((output, "".to_string(), 0)),
+                                            Err(e) => Ok(("".to_string(), format!("Runtime Error: {}\n", e), 1)),
+                                        }
+                                    },
+                                    Err(e) => Ok(("".to_string(), format!("{}: {}", cmd_name, e), 127))
+                                }
+                            },
+                            Err(e) => Ok(("".to_string(), format!("{}: {}", cmd_name, e), 127))
+                        }
+                    } else {
+                        Ok(("".to_string(), format!("{}: command not found", cmd_name), 127))
+                    }
                 }
             };
 
@@ -277,6 +394,9 @@ impl TerminalService {
                 let username;
 
                 if path.starts_with("/AppData") {
+                    storage_path = path;
+                    username = self.current_user.clone();
+                } else if path.starts_with("/bin") {
                     storage_path = path;
                     username = self.current_user.clone();
                 } else if path.starts_with(&format!("/User/{}", self.current_user)) {

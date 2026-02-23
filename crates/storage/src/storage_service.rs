@@ -57,6 +57,10 @@ impl StorageServiceImpl {
             Ok(p)
         } else if clean_path == "/AppData" {
             Ok(Path::new(&self.storage_path).join("vol1").join("AppData"))
+        } else if clean_path.starts_with("/bin") {
+            let rel = clean_path.trim_start_matches("/bin");
+            let rel = if rel.starts_with('/') { &rel[1..] } else { rel };
+            Ok(Path::new(&self.storage_path).join("vol1").join("bin").join(rel))
         } else {
             let rel = if clean_path.starts_with('/') { &clean_path[1..] } else { &clean_path };
             Ok(Path::new(&self.storage_path).join("vol1").join("User_Data").join(username).join(rel))
@@ -99,6 +103,35 @@ impl StorageService for StorageServiceImpl {
                                 });
                             }
                         }
+                    }
+                }
+            }
+            return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
+        }
+
+        if dir == "/bin" {
+            let mut entries = Vec::new();
+            let bin_path = Path::new(&self.storage_path).join("vol1/bin");
+            if let Ok(mut read_dir) = fs::read_dir(bin_path).await {
+                while let Ok(Some(entry)) = read_dir.next_entry().await {
+                    let path = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !name.starts_with('.') {
+                        let metadata = fs::metadata(&path).await.ok();
+                        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0) as i64;
+                        let modified = metadata.as_ref().and_then(|m| m.modified().ok())
+                            .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+                            .unwrap_or(0);
+                        let is_dir = path.is_dir();
+
+                        entries.push(DocsEntry {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            name,
+                            is_dir,
+                            size,
+                            modified_ts: modified,
+                            mime: if is_dir { "inode/directory".to_string() } else { "application/octet-stream".to_string() },
+                        });
                     }
                 }
             }
@@ -473,7 +506,7 @@ impl StorageService for StorageServiceImpl {
     async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<PathBuf> {
         let normalized_path = self.normalize_path(virtual_path);
 
-        if normalized_path.starts_with("/AppData") {
+        if normalized_path.starts_with("/AppData") || normalized_path.starts_with("/bin") {
             return self.resolve_physical_path(username, &normalized_path).await;
         }
 
@@ -520,7 +553,7 @@ impl StorageService for StorageServiceImpl {
     async fn save_file(&self, username: &str, parent_virtual_path: &str, name: &str, data: bytes::Bytes) -> Result<()> {
         let normalized_parent = self.normalize_path(parent_virtual_path);
 
-        if normalized_parent.starts_with("/AppData") {
+        if normalized_parent.starts_with("/AppData") || normalized_parent.starts_with("/bin") {
             let physical_parent = self.resolve_physical_path(username, &normalized_parent).await?;
             let physical_path = physical_parent.join(name);
             if let Some(parent) = physical_path.parent() {

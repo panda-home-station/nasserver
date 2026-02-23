@@ -7,6 +7,13 @@ pub mod ls;
 pub mod cd;
 pub mod sysinfo;
 pub mod echo;
+pub mod container;
+pub mod app;
+pub mod download;
+pub mod task;
+pub mod auth;
+pub mod blobfs;
+pub mod agent;
 
 #[async_trait]
 pub trait Command: Send + Sync {
