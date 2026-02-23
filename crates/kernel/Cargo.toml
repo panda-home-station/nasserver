@@ -19,3 +19,6 @@ futures-util = { workspace = true }
 async-recursion = "1.0"
 boa_engine = "0.19.0"
 boa_gc = "0.19.0"
+
+[lints]
+workspace = true

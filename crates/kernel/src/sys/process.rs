@@ -50,9 +50,19 @@ pub fn create_process_api(context: &mut Context, service: Arc<TerminalService>) 
         TerminalServiceWrapper(service_clone.clone())
     );
 
+    // process.user()
+    let user = NativeFunction::from_copy_closure_with_captures(
+        move |_this, _args, captures, _ctx| {
+            let service = &captures.0;
+            Ok(JsValue::from(JsString::from(service.current_user.clone())))
+        },
+        TerminalServiceWrapper(service_clone.clone())
+    );
+
     let obj = ObjectInitializer::new(context)
         .function(cwd, JsString::from("cwd"), 0)
         .function(chdir, JsString::from("chdir"), 1)
+        .function(user, JsString::from("user"), 0)
         .build();
         
     JsValue::from(obj)

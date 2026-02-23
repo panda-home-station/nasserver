@@ -1,11 +1,10 @@
 use std::sync::{Arc, Mutex};
-use boa_engine::{Context, Source, JsValue, NativeFunction, JsString, Finalize, Trace, JsError};
+use boa_engine::{Context, JsValue, NativeFunction, JsString, Finalize, Trace, Source};
 use boa_engine::object::ObjectInitializer;
 use boa_engine::property::Attribute;
 use crate::service::TerminalService;
 use crate::error::{Result, TerminalError};
-use domain::container::ContainerService;
-use crate::sys::{fs::create_fs_api, process::create_process_api};
+use crate::sys::{fs::create_fs_api, process::create_process_api, system::create_system_api, docker::create_docker_api};
 
 pub struct JsRuntime;
 
@@ -13,15 +12,6 @@ pub struct JsRuntime;
 struct OutputWrapper(Arc<Mutex<String>>);
 
 unsafe impl Trace for OutputWrapper {
-    unsafe fn trace(&self, _tracer: &mut boa_engine::gc::Tracer) {}
-    unsafe fn trace_non_roots(&self) {}
-    fn run_finalizer(&self) { Finalize::finalize(self) }
-}
-
-#[derive(Clone, Finalize)]
-struct ContainerServiceWrapper(Arc<dyn ContainerService>);
-
-unsafe impl Trace for ContainerServiceWrapper {
     unsafe fn trace(&self, _tracer: &mut boa_engine::gc::Tracer) {}
     unsafe fn trace_non_roots(&self) {}
     fn run_finalizer(&self) { Finalize::finalize(self) }
@@ -72,6 +62,7 @@ impl JsRuntime {
         let docker_api = create_docker_api(&mut context, service.container_service.clone());
         let fs_api = create_fs_api(&mut context, service.clone());
         let process_api = create_process_api(&mut context, service.clone());
+        let system_api = create_system_api(&mut context, service.clone());
 
         let sys_obj = ObjectInitializer::new(&mut context)
             .property(
@@ -87,6 +78,11 @@ impl JsRuntime {
             .property(
                 JsString::from("process"),
                 process_api,
+                Attribute::all()
+            )
+            .property(
+                JsString::from("system"),
+                system_api,
                 Attribute::all()
             )
             .build();
@@ -131,46 +127,6 @@ impl JsRuntime {
             }
         }
     }
-}
-
-fn create_docker_api(context: &mut Context, container_service: Arc<dyn ContainerService>) -> JsValue {
-    // sys.docker.ps()
-    let ps_func = NativeFunction::from_copy_closure_with_captures(
-        move |_this, _args, captures, ctx| {
-            let service = &captures.0;
-            let handle = tokio::runtime::Handle::current();
-            let result = handle.block_on(async {
-                service.list_containers().await
-            });
-            
-            match result {
-                Ok(containers) => {
-                    // Convert to JS Array of Objects
-                    let mut js_containers = Vec::new();
-                    for c in containers {
-                        let obj = ObjectInitializer::new(ctx)
-                            .property(JsString::from("id"), JsString::from(c.id), Attribute::all())
-                            .property(JsString::from("image"), JsString::from(c.image), Attribute::all())
-                            .property(JsString::from("status"), JsString::from(c.status.unwrap_or_default()), Attribute::all())
-                            .property(JsString::from("name"), JsString::from(c.names.first().cloned().unwrap_or_default()), Attribute::all())
-                            .build();
-                        js_containers.push(JsValue::from(obj));
-                    }
-                    Ok(JsValue::from(boa_engine::object::builtins::JsArray::from_iter(js_containers, ctx)))
-                },
-                Err(e) => {
-                    Err(JsError::from_opaque(JsValue::from(JsString::from(format!("Docker Error: {}", e)))))
-                }
-            }
-        },
-        ContainerServiceWrapper(container_service)
-    );
-
-    let obj = ObjectInitializer::new(context)
-        .function(ps_func, JsString::from("ps"), 0)
-        .build();
-        
-    JsValue::from(obj)
 }
 
 #[cfg(test)]

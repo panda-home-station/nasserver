@@ -21,7 +21,7 @@ impl<S: StorageService + Send + Sync + 'static> BlobFsServiceImpl<S> {
 #[async_trait]
 impl<S: StorageService + Send + Sync + 'static> BlobFsService for BlobFsServiceImpl<S> {
     async fn mount_for_user(&self, username: &str) -> DomainResult<()> {
-        let mount_point = format!("{}/User/{}", self.mount_root, username);
+        let mount_point = format!("{}/root", self.mount_root);
         let blobs_root = "/".to_string();
         let username_clone = username.to_string();
 

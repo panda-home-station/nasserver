@@ -11,22 +11,10 @@ use domain::blobfs::BlobFsService;
 use domain::agent::AgentService;
 use domain::dtos::docs::DocsListQuery;
 
-use crate::commands::{
-    Command, 
-    cd::CdCommand,
-    sysinfo::SysInfoCommand,
-    echo::EchoCommand,
-    container::DockerCommand,
-    app::AppCommand,
-    download::DownloadCommand,
-    task::TaskCommand,
-    auth::AuthCommand,
-    blobfs::BlobFsCommand,
-    agent::AgentCommand,
-};
 use crate::runtime::vm::JsRuntime;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct TerminalService {
     pub(crate) user_cwd: Arc<Mutex<String>>,
     pub(crate) current_user: String,
@@ -135,7 +123,7 @@ impl TerminalService {
     }
 
     pub fn get_available_commands() -> Vec<&'static str> {
-        vec!["ls", "cd", "cat", "sysinfo", "mkdir", "rm", "mv", "touch", "cp", "pwd", "whoami", "echo", "help", "docker", "app", "dl", "task", "auth", "blobfs", "agent"]
+        vec!["ls", "cd", "cat", "sysinfo", "mkdir", "rm", "mv", "touch", "cp", "pwd", "whoami", "echo", "help", "js"]
     }
 
     pub fn get_help_text() -> String {
@@ -151,7 +139,6 @@ impl TerminalService {
         // 1. Pre-process for Heredoc (<<EOF)
         // We handle this manually because we need to preserve newlines for the content
         let mut processed_command = command.to_string();
-        let mut initial_stdin = None;
 
         if let Some(idx) = processed_command.find("<<") {
             let after = &processed_command[idx+2..];
@@ -180,7 +167,7 @@ impl TerminalService {
                         }
                         
                         if found_end {
-                            initial_stdin = Some(content);
+                            // initial_stdin = Some(content);
                             
                             // Reconstruct command string:
                             // 1. Keep everything before `<<`
@@ -258,7 +245,6 @@ impl TerminalService {
         }
 
         // 4. Execute Pipeline
-        let mut current_input = initial_stdin;
         let mut final_output = (String::new(), String::new(), 0);
 
         for segment in pipeline {
@@ -306,35 +292,11 @@ impl TerminalService {
 
             let result = if let Some(res) = js_result {
                 match res {
-                    Ok(output) => Ok((output, "".to_string(), 0)),
+                    Ok(output) => Ok::<(std::string::String, std::string::String, i32), crate::error::TerminalError>((output, "".to_string(), 0)),
                     Err(e) => Ok(("".to_string(), format!("Error: {}\n", e), 1)),
                 }
             } else {
                 match cmd_name.as_str() {
-                    "cd" => CdCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                    // "ls" => LsCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
-                    // "cat" => CatCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
-                    "sysinfo" => SysInfoCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                    // "mkdir" => MkdirCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
-                    // "rm" => RmCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
-                    // "mv" => MvCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
-                    // "touch" => TouchCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
-                    // "cp" => CpCommand.execute(self, &cmd_args, current_input.as_deref()).await, // Hidden by JS
-                    "pwd" => {
-                    let cwd = self.get_user_cwd();
-                    Ok((format!("{}\n", cwd), "".to_string(), 0))
-                },
-                "whoami" => {
-                    Ok((format!("{}\n", self.current_user), "".to_string(), 0))
-                },
-                "echo" => EchoCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "docker" => DockerCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "app" => AppCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "dl" => DownloadCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "task" => TaskCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "auth" => AuthCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "blobfs" => BlobFsCommand.execute(self, &cmd_args, current_input.as_deref()).await,
-                "agent" => AgentCommand.execute(self, &cmd_args, current_input.as_deref()).await,
                 "help" => {
                     Ok((Self::get_help_text(), "".to_string(), 0))
                 },
@@ -378,8 +340,8 @@ impl TerminalService {
                     if cmd_name.starts_with("./") || cmd_name.starts_with("/") || cmd_name.starts_with("~") {
                         final_path = Some(self.resolve_path(cmd_name));
                     } else {
-                        // 2. Check PATH (currently only /bin)
-                        let bin_path = format!("/bin/{}", cmd_name);
+                        // 2. Check PATH (currently only /System/bin)
+                        let bin_path = format!("/System/bin/{}", cmd_name);
                         if let Ok(p) = self.storage_service.get_file_path(&self.current_user, &bin_path).await {
                              if tokio::fs::metadata(&p).await.is_ok() {
                                  final_path = Some(bin_path);
@@ -391,13 +353,13 @@ impl TerminalService {
                         // Check permissions and resolve to storage path
                         let (storage_path, username) = if path.starts_with("/AppData") {
                             (path.clone(), self.current_user.clone())
-                        } else if path.starts_with("/bin") {
-                            // /bin is owned by system/admin usually, but storage service handles mapping
+                        } else if path.starts_with("/System") {
+                            // /System is owned by system/admin usually, but storage service handles mapping
                             // We use current_user for access check?
                             // get_file_path usage above suggests we use current_user.
                             // But here we need to know who "owns" the file for reading?
                             // StorageService.get_file_path uses the username to resolve User_Data
-                            // BUT for /bin it ignores username and uses vol1/bin.
+                            // BUT for /System it ignores username and uses vol1/blobs (admin's).
                             (path.clone(), self.current_user.clone())
                         } else if path.starts_with(&format!("/User/{}", self.current_user)) {
                             let rel = path.trim_start_matches(&format!("/User/{}", self.current_user));
@@ -450,7 +412,7 @@ impl TerminalService {
                 if path.starts_with("/AppData") {
                     storage_path = path;
                     username = self.current_user.clone();
-                } else if path.starts_with("/bin") {
+                } else if path.starts_with("/System") {
                     storage_path = path;
                     username = self.current_user.clone();
                 } else if path.starts_with(&format!("/User/{}", self.current_user)) {
@@ -481,10 +443,8 @@ impl TerminalService {
                      return Ok(("".to_string(), format!("Failed to write to '{}': {}", target, e), 1));
                 }
                 
-                current_input = None;
                 final_output = ("".to_string(), stderr, code);
             } else {
-                current_input = Some(stdout.clone());
                 final_output = (stdout, stderr, code);
             }
         }
@@ -514,7 +474,7 @@ impl TerminalService {
         };
 
         if is_command {
-            let mut cmds = vec!["cd", "pwd", "whoami", "sysinfo", "clear", "echo", "js", "docker", "app", "dl", "task", "auth", "blobfs", "agent", "help"];
+            let mut cmds = vec!["clear", "js", "help"];
             cmds.extend_from_slice(crate::userland::COMMANDS);
             cmds.sort();
             cmds.dedup();

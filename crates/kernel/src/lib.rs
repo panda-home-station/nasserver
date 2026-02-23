@@ -3,7 +3,6 @@ pub mod sandbox;
 pub mod service;
 pub mod userland;
 pub mod sys;
-pub mod commands;
 pub mod runtime;
 
 pub use error::{TerminalError, Result};

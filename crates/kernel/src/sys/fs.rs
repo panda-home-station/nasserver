@@ -27,31 +27,10 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
             let result: Result<Vec<(String, String)>, String> = handle.block_on(async {
                 let resolved = service.resolve_path(&path_arg);
                 
-                // Root virtual listing
-                if resolved == "/" {
-                    return Ok(vec![
-                        ("AppData".to_string(), "dir".to_string()),
-                        ("User".to_string(), "dir".to_string()),
-                        ("bin".to_string(), "dir".to_string()),
-                    ]);
-                }
-
-                let (storage_path, username) = if resolved.starts_with("/AppData") {
-                    (resolved.clone(), service.current_user.clone())
-                } else if resolved.starts_with("/bin") {
-                    (resolved.clone(), service.current_user.clone())
-                } else if resolved.starts_with(&format!("/User/{}", service.current_user)) {
-                    let rel = resolved.trim_start_matches(&format!("/User/{}", service.current_user));
-                    let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
-                    (sp, service.current_user.clone())
-                } else {
-                    return Err("Permission denied".to_string());
-                };
-
                 match service.storage_service.list(
-                    &username,
+                    &service.current_user,
                     DocsListQuery {
-                        path: Some(storage_path),
+                        path: Some(resolved),
                         limit: None,
                         offset: None,
                     }
@@ -88,18 +67,7 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
             let handle = tokio::runtime::Handle::current();
             let result: Result<String, String> = handle.block_on(async {
                 let resolved = service.resolve_path(&path_arg);
-                let (storage_path, username) = if resolved.starts_with(&format!("/User/{}", service.current_user)) {
-                    let rel = resolved.trim_start_matches(&format!("/User/{}", service.current_user));
-                    let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
-                    (sp, service.current_user.clone())
-                } else if resolved.starts_with("/bin") {
-                     // Allow reading bin
-                    (resolved.clone(), service.current_user.clone())
-                } else {
-                     return Err("Permission denied".to_string());
-                };
-
-                match service.storage_service.get_file_path(&username, &storage_path).await {
+                match service.storage_service.get_file_path(&service.current_user, &resolved).await {
                     Ok(p) => match tokio::fs::read_to_string(&p).await {
                         Ok(c) => Ok(c),
                         Err(e) => Err(e.to_string())
@@ -127,21 +95,12 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
             let handle = tokio::runtime::Handle::current();
             let result: Result<(), String> = handle.block_on(async {
                 let resolved = service.resolve_path(&path_arg);
-                let (storage_path, username) = if resolved.starts_with(&format!("/User/{}", service.current_user)) {
-                    let rel = resolved.trim_start_matches(&format!("/User/{}", service.current_user));
-                    let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
-                    (sp, service.current_user.clone())
-                } else {
-                     return Err("Permission denied".to_string());
-                };
-                
-                let p = std::path::Path::new(&storage_path);
+                let p = std::path::Path::new(&resolved);
                 let parent_path = p.parent().unwrap_or(std::path::Path::new("/")).to_string_lossy().to_string();
                 let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
                 
                 let data = if append {
-                    // Read existing content if append is true
-                     if let Ok(existing_path) = service.storage_service.get_file_path(&username, &storage_path).await {
+                     if let Ok(existing_path) = service.storage_service.get_file_path(&service.current_user, &resolved).await {
                         if let Ok(mut existing_content) = tokio::fs::read(&existing_path).await {
                              existing_content.extend_from_slice(content_arg.as_bytes());
                              bytes::Bytes::from(existing_content)
@@ -155,7 +114,7 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
                     bytes::Bytes::from(content_arg)
                 };
 
-                match service.storage_service.save_file(&username, &parent_path, &name, data).await {
+                match service.storage_service.save_file(&service.current_user, &parent_path, &name, data).await {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e.to_string())
                 }
@@ -178,15 +137,7 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
             let handle = tokio::runtime::Handle::current();
             let result: Result<(), String> = handle.block_on(async {
                 let resolved = service.resolve_path(&path_arg);
-                let (storage_path, username) = if resolved.starts_with(&format!("/User/{}", service.current_user)) {
-                    let rel = resolved.trim_start_matches(&format!("/User/{}", service.current_user));
-                    let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
-                    (sp, service.current_user.clone())
-                } else {
-                     return Err("Permission denied".to_string());
-                };
-
-                match service.storage_service.mkdir(&username, DocsMkdirReq { path: storage_path }).await {
+                match service.storage_service.mkdir(&service.current_user, DocsMkdirReq { path: resolved }).await {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e.to_string())
                 }
@@ -209,15 +160,7 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
             let handle = tokio::runtime::Handle::current();
             let result: Result<(), String> = handle.block_on(async {
                 let resolved = service.resolve_path(&path_arg);
-                let (storage_path, username) = if resolved.starts_with(&format!("/User/{}", service.current_user)) {
-                    let rel = resolved.trim_start_matches(&format!("/User/{}", service.current_user));
-                    let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
-                    (sp, service.current_user.clone())
-                } else {
-                     return Err("Permission denied".to_string());
-                };
-
-                match service.storage_service.delete(&username, DocsDeleteQuery { path: Some(storage_path) }).await {
+                match service.storage_service.delete(&service.current_user, DocsDeleteQuery { path: Some(resolved) }).await {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e.to_string())
                 }
@@ -243,23 +186,7 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
                 let resolved_from = service.resolve_path(&from_arg);
                 let resolved_to = service.resolve_path(&to_arg);
                 
-                let (from_path, username) = if resolved_from.starts_with(&format!("/User/{}", service.current_user)) {
-                    let rel = resolved_from.trim_start_matches(&format!("/User/{}", service.current_user));
-                    let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
-                    (sp, service.current_user.clone())
-                } else {
-                     return Err("Permission denied (source)".to_string());
-                };
-
-                 let (to_path, _) = if resolved_to.starts_with(&format!("/User/{}", service.current_user)) {
-                    let rel = resolved_to.trim_start_matches(&format!("/User/{}", service.current_user));
-                    let sp = if rel.is_empty() { "/".to_string() } else { rel.to_string() };
-                    (sp, service.current_user.clone())
-                } else {
-                     return Err("Permission denied (dest)".to_string());
-                };
-
-                match service.storage_service.rename(&username, DocsRenameReq { from: Some(from_path), to: Some(to_path) }).await {
+                match service.storage_service.rename(&service.current_user, DocsRenameReq { from: Some(resolved_from), to: Some(resolved_to) }).await {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e.to_string())
                 }

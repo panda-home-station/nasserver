@@ -57,10 +57,6 @@ impl StorageServiceImpl {
             Ok(p)
         } else if clean_path == "/AppData" {
             Ok(Path::new(&self.storage_path).join("vol1").join("AppData"))
-        } else if clean_path.starts_with("/bin") {
-            let rel = clean_path.trim_start_matches("/bin");
-            let rel = if rel.starts_with('/') { &rel[1..] } else { rel };
-            Ok(Path::new(&self.storage_path).join("vol1").join("bin").join(rel))
         } else {
             let rel = if clean_path.starts_with('/') { &clean_path[1..] } else { &clean_path };
             Ok(Path::new(&self.storage_path).join("vol1").join("User_Data").join(username).join(rel))
@@ -73,6 +69,48 @@ impl StorageService for StorageServiceImpl {
     async fn list(&self, username: &str, query: DocsListQuery) -> Result<DocsListResp> {
         let dir = self.normalize_path(&query.path.unwrap_or_else(|| "/".to_string()));
         
+        if dir == "/" {
+            return Ok(DocsListResp {
+                path: dir,
+                entries: vec![
+                    DocsEntry { id: "sys".to_string(), name: "System".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string() },
+                    DocsEntry { id: "usr".to_string(), name: "User".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string() },
+                    DocsEntry { id: "app".to_string(), name: "AppData".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string() },
+                ],
+                has_more: false,
+                next_offset: 0
+            });
+        }
+
+        if dir == "/User" {
+            // List users. For now, we can list the current user, or all users if admin.
+            // Let's just list the current user to keep it simple and safe, 
+            // unless we want to allow browsing other users.
+            // The requirement says "/User/xxxx", implies multiple.
+            // Let's query sys.users.
+            
+            // If not admin, maybe only show self?
+            let users: Vec<String> = if username == "admin" {
+                sqlx::query_scalar("select username from sys.users order by username")
+                    .fetch_all(&self.db)
+                    .await
+                    .map_err(|e| DomainError::Database(e.to_string()))?
+            } else {
+                vec![username.to_string()]
+            };
+
+            let entries = users.into_iter().map(|u| DocsEntry {
+                id: format!("user-{}", u),
+                name: u,
+                is_dir: true,
+                size: 0,
+                modified_ts: 0,
+                mime: "inode/directory".to_string(),
+            }).collect();
+
+            return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
+        }
+
         if dir.starts_with("/AppData/") {
             let parts: Vec<&str> = dir.split('/').filter(|x| !x.is_empty()).collect();
             if parts.len() >= 2 {
@@ -109,57 +147,44 @@ impl StorageService for StorageServiceImpl {
             return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
         }
 
-        if dir == "/bin" {
-            let mut entries = Vec::new();
-            let bin_path = Path::new(&self.storage_path).join("vol1/bin");
-            if let Ok(mut read_dir) = fs::read_dir(bin_path).await {
-                while let Ok(Some(entry)) = read_dir.next_entry().await {
-                    let path = entry.path();
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.starts_with('.') {
-                        let metadata = fs::metadata(&path).await.ok();
-                        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0) as i64;
-                        let modified = metadata.as_ref().and_then(|m| m.modified().ok())
-                            .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
-                            .unwrap_or(0);
-                        let is_dir = path.is_dir();
-
-                        entries.push(DocsEntry {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            name,
-                            is_dir,
-                            size,
-                            modified_ts: modified,
-                            mime: if is_dir { "inode/directory".to_string() } else { "application/octet-stream".to_string() },
-                        });
-                    }
-                }
-            }
-            return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
-        }
-
         if !self.check_app_access(username, "file-manager").await? {
             return Err(DomainError::Forbidden("file-manager".to_string()));
         }
+
+        let (target_user_name, target_dir) = if dir.starts_with("/System") {
+            ("admin".to_string(), dir.clone())
+        } else if dir.starts_with("/User/") {
+            let parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+            if parts.len() < 2 {
+                return Err(DomainError::BadRequest("Invalid path".to_string()));
+            }
+            let u = parts[1];
+            if u != username && username != "admin" {
+                return Err(DomainError::Forbidden("Access denied".to_string()));
+            }
+            (u.to_string(), dir.clone())
+        } else {
+            return Err(DomainError::BadRequest("Invalid path".to_string()));
+        };
 
         let limit = query.limit.unwrap_or(200) as i64;
         let offset = query.offset.unwrap_or(0) as i64;
 
         let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-            .bind(username)
+            .bind(&target_user_name)
             .fetch_one(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
 
         let rows = sqlx::query("select id, name, size, mime, updated_at, storage from storage.cloud_files where user_id = $1 and dir = $2 order by name limit $3 offset $4")
             .bind(user_id)
-            .bind(&dir)
+            .bind(&target_dir)
             .bind(limit)
             .bind(offset)
             .fetch_all(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
-
+            
         let mut entries = Vec::new();
         for row in rows {
             let id: uuid::Uuid = row.get("id");
@@ -176,7 +201,7 @@ impl StorageService for StorageServiceImpl {
 
         let total: i64 = sqlx::query_scalar("select count(*) from storage.cloud_files where user_id = $1 and dir = $2")
             .bind(user_id)
-            .bind(&dir)
+            .bind(&target_dir)
             .fetch_one(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
@@ -195,12 +220,37 @@ impl StorageService for StorageServiceImpl {
         let parent = path_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
         let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
-        if full_path.starts_with("/AppData") || full_path.starts_with("/bin") {
+        if full_path.starts_with("/AppData") {
             let physical_path = self.resolve_physical_path(username, &full_path).await?;
             fs::create_dir_all(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else {
+            let (target_user_name, parent_dir) = if full_path.starts_with("/System") {
+                if username != "admin" {
+                    return Err(DomainError::Forbidden("Only admin can modify /System".to_string()));
+                }
+                if full_path == "/System" {
+                     return Err(DomainError::BadRequest("Cannot create system root".to_string()));
+                }
+                ("admin".to_string(), parent.to_string())
+            } else if full_path.starts_with("/User/") {
+                let parts: Vec<&str> = full_path.split('/').filter(|s| !s.is_empty()).collect();
+                if parts.len() < 2 {
+                     return Err(DomainError::BadRequest("Invalid path".to_string()));
+                }
+                let u = parts[1];
+                if u != username && username != "admin" {
+                     return Err(DomainError::Forbidden("Access denied".to_string()));
+                }
+                if parts.len() == 2 {
+                     return Err(DomainError::BadRequest("Cannot create user root".to_string()));
+                }
+                (u.to_string(), parent.to_string())
+            } else {
+                 return Err(DomainError::BadRequest("Invalid path".to_string()));
+            };
+
             let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-                .bind(username)
+                .bind(&target_user_name)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
@@ -209,7 +259,7 @@ impl StorageService for StorageServiceImpl {
                 .bind(uuid::Uuid::new_v4())
                 .bind(user_id)
                 .bind(name)
-                .bind(parent)
+                .bind(&parent_dir)
                 .bind(0i64)
                 .bind("inode/directory")
                 .bind("virtual")
@@ -245,8 +295,36 @@ impl StorageService for StorageServiceImpl {
             }
             fs::rename(old_physical, new_physical).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else {
+            let from_user = if from_path.starts_with("/System") {
+                "admin".to_string()
+            } else if from_path.starts_with("/User/") {
+                let parts: Vec<&str> = from_path.split('/').filter(|s| !s.is_empty()).collect();
+                if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid from path".to_string())); }
+                parts[1].to_string()
+            } else {
+                return Err(DomainError::BadRequest("Invalid from path".to_string()));
+            };
+
+            let to_user = if to_path.starts_with("/System") {
+                "admin".to_string()
+            } else if to_path.starts_with("/User/") {
+                let parts: Vec<&str> = to_path.split('/').filter(|s| !s.is_empty()).collect();
+                if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid to path".to_string())); }
+                parts[1].to_string()
+            } else {
+                return Err(DomainError::BadRequest("Invalid to path".to_string()));
+            };
+
+            if from_user != to_user {
+                return Err(DomainError::Forbidden("Cannot move files between different users/system".to_string()));
+            }
+
+            if from_user != username && username != "admin" {
+                return Err(DomainError::Forbidden("Access denied".to_string()));
+            }
+
             let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-                .bind(username)
+                .bind(&from_user)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
@@ -386,8 +464,23 @@ impl StorageService for StorageServiceImpl {
                 }
             }
         } else {
+            let target_user = if full_path.starts_with("/System") {
+                 if username != "admin" { return Err(DomainError::Forbidden("Only admin can modify /System".to_string())); }
+                 "admin".to_string()
+            } else if full_path.starts_with("/User/") {
+                 let parts: Vec<&str> = full_path.split('/').filter(|s| !s.is_empty()).collect();
+                 if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid path".to_string())); }
+                 parts[1].to_string()
+            } else {
+                 return Err(DomainError::BadRequest("Invalid path".to_string()));
+            };
+
+            if target_user != username && username != "admin" {
+                 return Err(DomainError::Forbidden("Access denied".to_string()));
+            }
+
             let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-                .bind(username)
+                .bind(&target_user)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
@@ -506,7 +599,7 @@ impl StorageService for StorageServiceImpl {
     async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<PathBuf> {
         let normalized_path = self.normalize_path(virtual_path);
 
-        if normalized_path.starts_with("/AppData") || normalized_path.starts_with("/bin") {
+        if normalized_path.starts_with("/AppData") {
             return self.resolve_physical_path(username, &normalized_path).await;
         }
 
@@ -518,21 +611,46 @@ impl StorageService for StorageServiceImpl {
             return Err(DomainError::NotFound("File name is empty.".to_string()));
         }
 
-        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-            .bind(username)
-            .fetch_one(&self.db)
+        let blob_hash: Option<String>;
+        if normalized_path.starts_with("/System") {
+             // System binaries (public read)
+             blob_hash = sqlx::query_scalar(
+                "SELECT blob_hash FROM storage.cloud_files WHERE dir = $1 AND name = $2 AND blob_hash IS NOT NULL"
+            )
+            .bind(parent_dir)
+            .bind(name)
+            .fetch_optional(&self.db)
             .await
-            .map_err(|_| DomainError::NotFound(format!("User {} not found", username)))?;
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+        } else {
+            let target_user = if normalized_path.starts_with("/User/") {
+                 let parts: Vec<&str> = normalized_path.split('/').filter(|s| !s.is_empty()).collect();
+                 if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid path".to_string())); }
+                 parts[1].to_string()
+            } else {
+                 return Err(DomainError::BadRequest("Invalid path".to_string()));
+            };
+            
+            if target_user != username && username != "admin" {
+                  return Err(DomainError::Forbidden("Access denied".to_string()));
+            }
 
-        let blob_hash: Option<String> = sqlx::query_scalar(
-            "SELECT blob_hash FROM storage.cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3 AND blob_hash IS NOT NULL"
-        )
-        .bind(user_id)
-        .bind(parent_dir)
-        .bind(name)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| DomainError::Database(e.to_string()))?;
+            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+                .bind(&target_user)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|_| DomainError::NotFound(format!("User {} not found", target_user)))?;
+
+            blob_hash = sqlx::query_scalar(
+                "SELECT blob_hash FROM storage.cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3 AND blob_hash IS NOT NULL"
+            )
+            .bind(user_id)
+            .bind(parent_dir)
+            .bind(name)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+        }
 
         match blob_hash {
             Some(hash) => {
@@ -553,7 +671,7 @@ impl StorageService for StorageServiceImpl {
     async fn save_file(&self, username: &str, parent_virtual_path: &str, name: &str, data: bytes::Bytes) -> Result<()> {
         let normalized_parent = self.normalize_path(parent_virtual_path);
 
-        if normalized_parent.starts_with("/AppData") || normalized_parent.starts_with("/bin") {
+        if normalized_parent.starts_with("/AppData") {
             let physical_parent = self.resolve_physical_path(username, &normalized_parent).await?;
             let physical_path = physical_parent.join(name);
             if let Some(parent) = physical_path.parent() {
@@ -561,6 +679,21 @@ impl StorageService for StorageServiceImpl {
             }
             fs::write(&physical_path, &data).await.map_err(|e| DomainError::Io(e.to_string()))?;
             return Ok(());
+        }
+
+        let target_user = if normalized_parent.starts_with("/System") {
+             if username != "admin" { return Err(DomainError::Forbidden("Only admin can modify /System".to_string())); }
+             "admin".to_string()
+        } else if normalized_parent.starts_with("/User/") {
+             let parts: Vec<&str> = normalized_parent.split('/').filter(|s| !s.is_empty()).collect();
+             if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid path".to_string())); }
+             parts[1].to_string()
+        } else {
+             return Err(DomainError::BadRequest("Invalid path".to_string()));
+        };
+        
+        if target_user != username && username != "admin" {
+             return Err(DomainError::Forbidden("Access denied".to_string()));
         }
 
         // User files are stored in the blob store
@@ -581,7 +714,7 @@ impl StorageService for StorageServiceImpl {
         }
 
         let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-            .bind(username)
+            .bind(&target_user)
             .fetch_one(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
