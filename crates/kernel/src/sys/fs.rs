@@ -84,7 +84,7 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
         TerminalServiceWrapper(service_clone.clone())
     );
     
-    // fs.writeFile(path, content)
+    // fs.writeFile(path, content, append)
     let write_file = NativeFunction::from_copy_closure_with_captures(
         move |_this, args, captures, _ctx| {
             let service = &captures.0;
@@ -99,24 +99,52 @@ pub fn create_fs_api(context: &mut Context, service: Arc<TerminalService>) -> Js
                 let parent_path = p.parent().unwrap_or(std::path::Path::new("/")).to_string_lossy().to_string();
                 let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
                 
-                let data = if append {
+                // Create temp file
+                let temp_dir = std::env::temp_dir();
+                let temp_file_path = temp_dir.join(format!("kernel_write_{}_{}", service.current_user, uuid::Uuid::new_v4()));
+                
+                if append {
+                     // Try to locate existing file
                      if let Ok(existing_path) = service.storage_service.get_file_path(&service.current_user, &resolved).await {
-                        if let Ok(mut existing_content) = tokio::fs::read(&existing_path).await {
-                             existing_content.extend_from_slice(content_arg.as_bytes());
-                             bytes::Bytes::from(existing_content)
-                        } else {
-                             bytes::Bytes::from(content_arg)
-                        }
-                    } else {
-                        bytes::Bytes::from(content_arg)
-                    }
-                } else {
-                    bytes::Bytes::from(content_arg)
-                };
+                         // Copy existing to temp (streaming copy, O(1) memory)
+                         if let Err(e) = tokio::fs::copy(&existing_path, &temp_file_path).await {
+                             // If copy fails, maybe file doesn't exist or other error.
+                             // If append is true but file doesn't exist, we just create new.
+                             // But if copy failed for other reasons (perm), we might want to error?
+                             // For now, assume if copy fails, we treat as new file if it was not found.
+                             // But tokio::fs::copy returns error if from doesn't exist.
+                             // We should check error kind?
+                             // get_file_path returning Ok means it *should* exist.
+                             return Err(format!("Failed to copy existing file: {}", e));
+                         }
+                     }
+                }
+                
+                // Append/Write content
+                // Open for append if it exists (copied), or create if new
+                let mut file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .append(true) 
+                    .open(&temp_file_path)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    
+                use tokio::io::AsyncWriteExt;
+                if let Err(e) = file.write_all(content_arg.as_bytes()).await {
+                    return Err(format!("Failed to write content: {}", e));
+                }
+                if let Err(e) = file.sync_all().await {
+                     return Err(format!("Failed to sync content: {}", e));
+                }
+                drop(file); // Close file before saving
 
-                match service.storage_service.save_file(&service.current_user, &parent_path, &name, data).await {
+                match service.storage_service.save_file_from_path(&service.current_user, &parent_path, &name, &temp_file_path).await {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(e.to_string())
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&temp_file_path).await;
+                        Err(e.to_string())
+                    }
                 }
             });
 

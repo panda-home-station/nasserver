@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 domain = { workspace = true }
-fuse_fs = { workspace = true }
+# fuse_fs = { workspace = true }
 
 axum = { workspace = true }
 tokio = { workspace = true }

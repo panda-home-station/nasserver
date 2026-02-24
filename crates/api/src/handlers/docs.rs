@@ -5,7 +5,7 @@ use axum::{
 };
 use axum::body::Body;
 use tokio_util::io::ReaderStream;
-use tokio::fs::{self as tokio_fs};
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 use infra::AppState;
 use domain::entities::auth::AuthUser;
 use domain::storage::{DocsListResp, DocsListQuery, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery, InitiateMultipartReq, UploadPartQuery, CompleteMultipartReq};
@@ -83,14 +83,14 @@ pub async fn download(
     Query(q): Query<DocsDownloadQuery>,
 ) -> ApiResult<impl IntoResponse> {
     let path = q.path.as_deref().unwrap_or("/");
-    let physical_path = state.storage_service.get_file_path(&user.username, path).await?;
+    let reader = state.storage_service.get_file_reader(&user.username, path).await?;
     
-    let file = tokio_fs::File::open(&physical_path).await?;
-    let stream = ReaderStream::new(file);
+    // Convert futures::io::AsyncRead to tokio::io::AsyncRead
+    let stream = ReaderStream::new(reader.compat());
     let body = Body::from_stream(stream);
 
-    let mime = mime_guess::from_path(&physical_path).first_or_octet_stream();
-    let name = physical_path.file_name().unwrap_or_default().to_string_lossy();
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let name = std::path::Path::new(path).file_name().unwrap_or_default().to_string_lossy();
 
     Ok(Response::builder()
         .header("Content-Type", mime.as_ref())

@@ -2,12 +2,13 @@
 // 目前系统已迁移至基于数据库与 blob 的文件管理，不再需要对 $storage/vol1/User 进行扫描与监听。
 
 use crate::state::AppState;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
-use notify::event::{ModifyKind, RenameMode, AccessKind};
+// use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+// use std::path::{Path, PathBuf};
+// use tokio::sync::mpsc;
+// use notify::event::{ModifyKind, RenameMode, AccessKind};
 
-pub async fn init(state: AppState) {
+pub async fn init(_state: AppState) {
+    /*
     let watch_path = format!("{}/vol1/User", state.storage_path);
     let watch_path_buf = PathBuf::from(&watch_path);
 
@@ -53,8 +54,10 @@ pub async fn init(state: AppState) {
             process_event(&state, event).await;
         }
     });
+    */
 }
 
+/*
 use std::collections::VecDeque;
 
 async fn cleanup_temp_files(root_path: &str) -> std::io::Result<()> {
@@ -173,3 +176,4 @@ async fn handle_rename(state: &AppState, from: &Path, to: &Path) {
         let _ = state.storage_service.move_external_change(from, to).await;
     }
 }
+*/

@@ -8,7 +8,7 @@ use system::SystemServiceImpl;
 use storage::StorageServiceImpl;
 use agent::AgentServiceImpl;
 use task::TaskServiceImpl;
-use fuse_fs::BlobFsServiceImpl;
+// use fuse_fs::BlobFsServiceImpl;
 
 pub async fn init() -> AppState {
     dotenvy::dotenv().ok();
@@ -35,8 +35,8 @@ pub async fn init() -> AppState {
     let app_manager = Arc::new(DockerAppManager::new());
     let system_service = Arc::new(SystemServiceImpl::new(pools.sys.clone(), *START_TIME));
     let storage_service = Arc::new(StorageServiceImpl::new(pools.storage.clone(), storage_path.clone()));
-    let blob_fs_service = Arc::new(BlobFsServiceImpl::new(storage_service.clone(), format!("{}/vol1", storage_path)));
-    let auth_service = Arc::new(AuthServiceImpl::new(pools.sys.clone(), jwt_secret.clone(), storage_path.clone(), blob_fs_service.clone()));
+    // let blob_fs_service = Arc::new(BlobFsServiceImpl::new(storage_service.clone(), format!("{}/vol1", storage_path)));
+    let auth_service = Arc::new(AuthServiceImpl::new(pools.sys.clone(), jwt_secret.clone(), storage_path.clone()));
     let container_service = Arc::new(ContainerServiceImpl::new(storage_path.clone()));
     let task_service = Arc::new(TaskServiceImpl::new(pools.storage.clone()));
 
@@ -61,7 +61,7 @@ pub async fn init() -> AppState {
         container_service.clone(),
         app_manager.clone(),
         task_service.clone(),
-        blob_fs_service.clone(),
+        // blob_fs_service.clone(),
         format!("{}/vol1", storage_path)
     ));
 
@@ -82,6 +82,6 @@ pub async fn init() -> AppState {
         downloader_service,
         agent_service,
         task_service,
-        blob_fs_service,
+        // blob_fs_service,
     }
 }

@@ -5,7 +5,7 @@ pub use crate::dtos::docs::{
     DocsListQuery, DocsMkdirReq, DocsRenameReq, DocsDownloadQuery, DocsDeleteQuery,
     DocsListResp
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct InitiateMultipartReq {
@@ -37,13 +37,11 @@ pub trait StorageService: Send + Sync {
     async fn mkdir(&self, username: &str, req: DocsMkdirReq) -> Result<()>;
     async fn rename(&self, username: &str, req: DocsRenameReq) -> Result<()>;
     async fn delete(&self, username: &str, query: DocsDeleteQuery) -> Result<()>;
-    async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<PathBuf>;
+    async fn get_file_reader(&self, username: &str, virtual_path: &str) -> Result<Box<dyn futures_util::io::AsyncRead + Unpin + Send + Sync>>;
+    async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<std::path::PathBuf>;
+    async fn commit_blob_change(&self, username: &str, virtual_path: &str, temp_path: &std::path::Path) -> Result<()>;
     async fn save_file(&self, username: &str, parent_virtual_path: &str, name: &str, data: bytes::Bytes) -> Result<()>;
-    async fn sync_external_change(&self, physical_path: &Path) -> Result<()>;
-    async fn remove_external_change(&self, physical_path: &Path) -> Result<()>;
-    async fn move_external_change(&self, from: &Path, to: &Path) -> Result<()>;
-    async fn update_file_metadata(&self, username: &str, virtual_path: &str, size: i64) -> Result<()>;
-    async fn commit_blob_change(&self, username: &str, virtual_path: &str, temp_path: &Path) -> Result<()>;
+    async fn save_file_from_path(&self, username: &str, parent_virtual_path: &str, name: &str, temp_path: &Path) -> Result<()>;
     async fn run_trash_purger(&self);
 
     async fn initiate_multipart_upload(&self, username: &str, parent_virtual_path: &str, name: &str) -> Result<String>;

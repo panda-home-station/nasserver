@@ -1,4 +1,5 @@
-use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep, ChatMessageEntity, ChatSession}, system::SystemService, storage::StorageService, auth::AuthService, downloader::DownloaderService, container::{ContainerService, AppManager}, task::TaskService, blobfs::BlobFsService};
+use domain::{Result, Error, agent::{AgentService, AgentTask, TaskRequest, TaskResponse, ChatRequest, TaskStep, ChatMessageEntity, ChatSession}, system::SystemService, storage::StorageService, auth::AuthService, downloader::DownloaderService, container::{ContainerService, AppManager}, task::TaskService};
+// use domain::blobfs::BlobFsService;
 use async_trait::async_trait;
 use axum::response::sse::Event;
 use futures_util::stream::{BoxStream, StreamExt};
@@ -28,7 +29,7 @@ pub struct AgentServiceImpl {
     container_service: Arc<dyn ContainerService>,
     app_manager: Arc<dyn AppManager>,
     task_service: Arc<dyn TaskService>,
-    blobfs_service: Arc<dyn BlobFsService>,
+    // blobfs_service: Arc<dyn BlobFsService>,
     provider: Arc<dyn Provider>,
     sandbox: Arc<dyn Sandbox>,
     active_cwds: Arc<Mutex<HashMap<String, Arc<Mutex<String>>>>>,
@@ -45,7 +46,7 @@ impl AgentServiceImpl {
         container_service: Arc<dyn ContainerService>,
         app_manager: Arc<dyn AppManager>,
         task_service: Arc<dyn TaskService>,
-        blobfs_service: Arc<dyn BlobFsService>,
+        // blobfs_service: Arc<dyn BlobFsService>,
         _mount_root: String
     ) -> Self {
         // Initialize Agent
@@ -77,7 +78,7 @@ impl AgentServiceImpl {
             container_service,
             app_manager,
             task_service,
-            blobfs_service,
+            // blobfs_service,
             provider,
             sandbox,
             active_cwds: Arc::new(Mutex::new(HashMap::new())),
@@ -238,7 +239,7 @@ impl AgentService for AgentServiceImpl {
             self.container_service.clone(),
             self.app_manager.clone(),
             self.task_service.clone(),
-            self.blobfs_service.clone(),
+            // self.blobfs_service.clone(),
             agent_service_ref,
             username
         ).with_cwd_ref(cwd_ref));
@@ -480,7 +481,7 @@ impl AgentService for AgentServiceImpl {
             self.container_service.clone(),
             self.app_manager.clone(),
             self.task_service.clone(),
-            self.blobfs_service.clone(),
+            // self.blobfs_service.clone(),
             agent_service_ref,
             username
         ).with_cwd_ref(cwd_ref));
@@ -526,7 +527,7 @@ impl AgentService for AgentServiceImpl {
             self.container_service.clone(),
             self.app_manager.clone(),
             self.task_service.clone(),
-            self.blobfs_service.clone(),
+            // self.blobfs_service.clone(),
             agent_service_ref,
             username.clone(),
         );

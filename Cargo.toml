@@ -12,7 +12,7 @@ members = [
     "crates/infra",
     "crates/api",
     "crates/domain",
-    "crates/fuse_fs",
+    # "crates/fuse_fs",
     "crates/kernel",
 ]
 resolver = "2"
@@ -27,7 +27,7 @@ edition = "2021"
 [workspace.dependencies]
 axum = { version = "0.7", features = ["macros", "json", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "compat"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -46,7 +46,7 @@ base64ct = "=1.6.0"
 sysinfo = "0.30"
 local-ip-address = "0.6"
 bollard = "0.15"
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["io"] }
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 urlencoding = "2.1"
@@ -76,5 +76,5 @@ gpu = { path = "crates/gpu" }
 infra = { path = "crates/infra" }
 api = { path = "crates/api" }
 domain = { path = "crates/domain" }
-fuse_fs = { path = "crates/fuse_fs" }
+# fuse_fs = { path = "crates/fuse_fs" }
 kernel = { path = "crates/kernel" }

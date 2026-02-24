@@ -7,7 +7,7 @@ use domain::system::SystemService;
 use domain::downloader::DownloaderService;
 use domain::container::{ContainerService, AppManager};
 use domain::task::TaskService;
-use domain::blobfs::BlobFsService;
+// use domain::blobfs::BlobFsService;
 use domain::agent::AgentService;
 use domain::dtos::docs::DocsListQuery;
 
@@ -25,7 +25,7 @@ pub struct TerminalService {
     pub(crate) container_service: Arc<dyn ContainerService>,
     pub(crate) app_manager: Arc<dyn AppManager>,
     pub(crate) task_service: Arc<dyn TaskService>,
-    pub(crate) blobfs_service: Arc<dyn BlobFsService>,
+    // pub(crate) blobfs_service: Arc<dyn BlobFsService>,
     pub(crate) agent_service: Option<Arc<dyn AgentService>>,
 }
 
@@ -38,7 +38,7 @@ impl TerminalService {
         container_service: Arc<dyn ContainerService>,
         app_manager: Arc<dyn AppManager>,
         task_service: Arc<dyn TaskService>,
-        blobfs_service: Arc<dyn BlobFsService>,
+        // blobfs_service: Arc<dyn BlobFsService>,
         agent_service: Option<Arc<dyn AgentService>>,
         current_user: String,
     ) -> Self {
@@ -52,7 +52,7 @@ impl TerminalService {
             container_service,
             app_manager,
             task_service,
-            blobfs_service,
+            // blobfs_service,
             agent_service,
         };
 

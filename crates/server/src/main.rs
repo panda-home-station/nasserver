@@ -1,8 +1,8 @@
 mod init;
 
 use std::net::SocketAddr;
-use infra::sqlx; // Import sqlx from infra
-use infra::sqlx::Row; // Import Row trait
+// use infra::sqlx; // Import sqlx from infra
+// use infra::sqlx::Row; // Import Row trait
 
 #[tokio::main]
 async fn main() {
@@ -25,6 +25,7 @@ async fn main() {
         storage_service.run_trash_purger().await;
     });
 
+    /*
     // 2.5 Mount FUSE for all existing users
     let db = state.db.clone();
     let blob_fs = state.blob_fs_service.clone();
@@ -48,6 +49,7 @@ async fn main() {
             }
         }
     });
+    */
 
     // 3. Start Static Server
     let static_port: u16 = std::env::var("PNAS_STATIC_PORT")

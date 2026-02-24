@@ -4,20 +4,24 @@ use domain::{Result, Error as DomainError, storage::{
     DocsListQuery, DocsListResp, DocsEntry, DocsMkdirReq, DocsRenameReq, DocsDeleteQuery
 }};
 use sqlx::{Pool, Postgres, Row};
-use std::path::{Path, PathBuf};
-use tokio::fs;
+use opendal::{Operator, services::Fs};
+use std::path::Path;
 use sha2::{Sha256, Digest};
-use std::ffi::OsStr;
 use chrono::Utc;
+use futures_util::io::AsyncRead;
 
 pub struct StorageServiceImpl {
     db: Pool<Postgres>,
+    op: Operator,
     storage_path: String,
 }
 
 impl StorageServiceImpl {
     pub fn new(db: Pool<Postgres>, storage_path: String) -> Self {
-        Self { db, storage_path }
+        let mut builder = Fs::default();
+        builder.root(&storage_path);
+        let op = Operator::new(builder).unwrap().finish();
+        Self { db, op, storage_path }
     }
 
     fn normalize_path(&self, p: &str) -> String {
@@ -38,28 +42,29 @@ impl StorageServiceImpl {
         Ok(count > 0)
     }
 
-    async fn resolve_physical_path(&self, username: &str, virtual_path: &str) -> Result<PathBuf> {
+    async fn resolve_opendal_path(&self, username: &str, virtual_path: &str) -> Result<String> {
         let clean_path = self.normalize_path(virtual_path);
+        
         if clean_path.starts_with("/AppData/") {
             let parts: Vec<&str> = clean_path.split('/').filter(|x| !x.is_empty()).collect();
             if parts.len() < 2 {
-                return Ok(Path::new(&self.storage_path).join("vol1").join("AppData"));
+                return Ok("vol1/AppData".to_string());
             }
             let app_name = parts[1];
             if !self.check_app_access(username, app_name).await? {
                 return Err(DomainError::Forbidden(format!("Access denied to app: {}", app_name)));
             }
-            let mut p = Path::new(&self.storage_path).join("vol1").join("AppData").join(app_name);
+            let mut p = format!("vol1/AppData/{}", app_name);
             if parts.len() > 2 {
                 let rel = parts[2..].join("/");
-                p = p.join(rel);
+                p = format!("{}/{}", p, rel);
             }
             Ok(p)
         } else if clean_path == "/AppData" {
-            Ok(Path::new(&self.storage_path).join("vol1").join("AppData"))
+            Ok("vol1/AppData".to_string())
         } else {
             let rel = if clean_path.starts_with('/') { &clean_path[1..] } else { &clean_path };
-            Ok(Path::new(&self.storage_path).join("vol1").join("User_Data").join(username).join(rel))
+            Ok(format!("vol1/User_Data/{}/{}", username, rel))
         }
     }
 }
@@ -111,37 +116,39 @@ impl StorageService for StorageServiceImpl {
             return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
         }
 
-        if dir.starts_with("/AppData/") {
-            let parts: Vec<&str> = dir.split('/').filter(|x| !x.is_empty()).collect();
-            if parts.len() >= 2 {
-                let app_name = parts[1];
-                if !self.check_app_access(username, app_name).await? {
-                    return Ok(DocsListResp { path: dir, entries: vec![], has_more: false, next_offset: 0 });
-                }
-            }
-        }
-
-        if dir == "/AppData" {
+        if dir.starts_with("/AppData") {
+            let op_path = self.resolve_opendal_path(username, &dir).await?;
             let mut entries = Vec::new();
-            let app_data_path = Path::new(&self.storage_path).join("vol1/AppData");
-            if let Ok(mut read_dir) = fs::read_dir(app_data_path).await {
-                while let Ok(Some(entry)) = read_dir.next_entry().await {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if !name.starts_with('.') {
-                            if self.check_app_access(username, &name).await? {
-                                entries.push(DocsEntry {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    name,
-                                    is_dir: true,
-                                    size: 0,
-                                    modified_ts: 0,
-                                    mime: "inode/directory".to_string(),
-                                });
-                            }
+
+            // OpenDAL list usually requires trailing slash for directory, or just the path.
+            // Let's ensure trailing slash if it's a directory we are listing.
+            let list_path = if op_path.ends_with('/') { op_path.clone() } else { format!("{}/", op_path) };
+
+            if let Ok(op_entries) = self.op.list(&list_path).await {
+                for entry in op_entries {
+                    let name = entry.name().to_string();
+                    
+                    // Filter out current directory if returned
+                    if name.is_empty() || name == "." { continue; }
+
+                    let is_dir = entry.metadata().mode().is_dir();
+                    
+                    // For /AppData root, we need to check access for each app
+                    if dir == "/AppData" {
+                        if !is_dir { continue; } // Only dirs in AppData root
+                        if !self.check_app_access(username, &name).await? {
+                            continue;
                         }
                     }
+
+                    entries.push(DocsEntry {
+                        id: uuid::Uuid::new_v4().to_string(), // Generate random ID for non-DB entries
+                        name: name.clone(),
+                        is_dir,
+                        size: entry.metadata().content_length() as i64,
+                        modified_ts: entry.metadata().last_modified().map(|t| t.timestamp_millis()).unwrap_or(0),
+                        mime: if is_dir { "inode/directory".to_string() } else { mime_guess::from_path(&name).first_or_octet_stream().to_string() },
+                    });
                 }
             }
             return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
@@ -221,8 +228,8 @@ impl StorageService for StorageServiceImpl {
         let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
         if full_path.starts_with("/AppData") {
-            let physical_path = self.resolve_physical_path(username, &full_path).await?;
-            fs::create_dir_all(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            let op_path = self.resolve_opendal_path(username, &full_path).await?;
+            self.op.create_dir(&format!("{}/", op_path)).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else {
             let (target_user_name, parent_dir) = if full_path.starts_with("/System") {
                 if username != "admin" {
@@ -288,12 +295,22 @@ impl StorageService for StorageServiceImpl {
         let to_name = to_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid to path".to_string()))?;
 
         if from_path.starts_with("/AppData") || to_path.starts_with("/AppData") {
-            let old_physical = self.resolve_physical_path(username, &from_path).await?;
-            let new_physical = self.resolve_physical_path(username, &to_path).await?;
-            if let Some(parent) = new_physical.parent() {
-                fs::create_dir_all(parent).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            let from_op = self.resolve_opendal_path(username, &from_path).await?;
+            let to_op = self.resolve_opendal_path(username, &to_path).await?;
+            
+            // OpenDAL rename handles parent creation if backend supports it, but for Fs we might need to be careful?
+            // Actually OpenDAL's rename contract: behavior is defined by backend. Fs usually requires parent.
+            // But we can rely on OpenDAL to abstract or we might need to create parent if not exists.
+            // Let's assume standard rename.
+            
+            // Check if source exists (optional but good for error)
+            if self.op.stat(&from_op).await.is_err() {
+                // If it's not found, maybe it's a directory without trailing slash?
+                // Or maybe it's a file.
+                // For now, let's just try rename.
             }
-            fs::rename(old_physical, new_physical).await.map_err(|e| DomainError::Io(e.to_string()))?;
+
+            self.op.rename(&from_op, &to_op).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else {
             let from_user = if from_path.starts_with("/System") {
                 "admin".to_string()
@@ -372,13 +389,8 @@ impl StorageService for StorageServiceImpl {
         let name = path_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
 
         if full_path.starts_with("/AppData") {
-            let physical_path = self.resolve_physical_path(username, &full_path).await?;
-            let attr = fs::metadata(&physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-            if attr.is_dir() {
-                fs::remove_dir_all(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-            } else {
-                fs::remove_file(physical_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-            }
+            let op_path = self.resolve_opendal_path(username, &full_path).await?;
+            self.op.remove_all(&op_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else if full_path == "/Trash" || full_path.starts_with("/Trash/") {
             let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
                 .bind(username)
@@ -409,12 +421,8 @@ impl StorageService for StorageServiceImpl {
                             .await
                             .unwrap_or(0);
                         if cnt == 0 {
-                            let blob_path = Path::new(&self.storage_path)
-                                .join("vol1/blobs")
-                                .join(&hash[0..2])
-                                .join(&hash[2..4])
-                                .join(&hash);
-                            let _ = fs::remove_file(blob_path).await;
+                            let blob_path = format!("vol1/blobs/{}/{}/{}", &hash[0..2], &hash[2..4], &hash);
+                            let _ = self.op.delete(&blob_path).await;
                         }
                     }
                 }
@@ -447,13 +455,9 @@ impl StorageService for StorageServiceImpl {
                                     .await
                                     .unwrap_or(0);
                                 if cnt == 0 {
-                                    let blob_path = Path::new(&self.storage_path)
-                                        .join("vol1/blobs")
-                                        .join(&ch[0..2])
-                                        .join(&ch[2..4])
-                                        .join(&ch);
-                                    let _ = fs::remove_file(blob_path).await;
-                                }
+                                        let blob_path = format!("vol1/blobs/{}/{}/{}", &ch[0..2], &ch[2..4], &ch);
+                                        let _ = self.op.delete(&blob_path).await;
+                                    }
                             }
                         }
                         let _ = sqlx::query("delete from storage.cloud_files where id = $1")
@@ -596,16 +600,20 @@ impl StorageService for StorageServiceImpl {
         Ok(())
     }
 
-    async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<PathBuf> {
+
+
+    async fn get_file_reader(&self, username: &str, virtual_path: &str) -> Result<Box<dyn AsyncRead + Unpin + Send + Sync>> {
         let normalized_path = self.normalize_path(virtual_path);
 
         if normalized_path.starts_with("/AppData") {
-            return self.resolve_physical_path(username, &normalized_path).await;
+            let op_path = self.resolve_opendal_path(username, &normalized_path).await?;
+            let reader = self.op.reader(&op_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            return Ok(Box::new(reader));
         }
 
         let path = Path::new(&normalized_path);
-        let parent_dir = path.parent().and_then(Path::to_str).unwrap_or("/");
-        let name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
+        let parent_dir = path.parent().and_then(|p| p.to_str()).unwrap_or("/");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if name.is_empty() {
             return Err(DomainError::NotFound("File name is empty.".to_string()));
@@ -613,7 +621,6 @@ impl StorageService for StorageServiceImpl {
 
         let blob_hash: Option<String>;
         if normalized_path.starts_with("/System") {
-             // System binaries (public read)
              blob_hash = sqlx::query_scalar(
                 "SELECT blob_hash FROM storage.cloud_files WHERE dir = $1 AND name = $2 AND blob_hash IS NOT NULL"
             )
@@ -652,32 +659,104 @@ impl StorageService for StorageServiceImpl {
             .map_err(|e| DomainError::Database(e.to_string()))?;
         }
 
-        match blob_hash {
-            Some(hash) => {
-                let blob_path = Path::new(&self.storage_path)
-                    .join("vol1/blobs")
-                    .join(&hash[0..2])
-                    .join(&hash[2..4])
-                    .join(&hash);
-                Ok(blob_path)
-            }
-            None => {
-                // Fallback for files not yet migrated
-                self.resolve_physical_path(username, &normalized_path).await
-            }
+        let op_path = match blob_hash {
+            Some(hash) if !hash.is_empty() => format!("vol1/blobs/{}/{}/{}", &hash[0..2], &hash[2..4], &hash),
+            _ => self.resolve_opendal_path(username, &normalized_path).await?,
+        };
+
+        let reader = self.op.reader(&op_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        Ok(Box::new(reader))
+    }
+
+
+
+    async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<std::path::PathBuf> {
+        let normalized_path = self.normalize_path(virtual_path);
+        let op_path;
+
+        if normalized_path.starts_with("/AppData") {
+            op_path = self.resolve_opendal_path(username, &normalized_path).await?;
+        } else {
+             let path = Path::new(&normalized_path);
+             let parent_dir = path.parent().and_then(|p| p.to_str()).unwrap_or("/");
+             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+             if name.is_empty() {
+                 return Err(DomainError::NotFound("File name is empty.".to_string()));
+             }
+
+             let blob_hash: Option<String>;
+             if normalized_path.starts_with("/System") {
+                  blob_hash = sqlx::query_scalar(
+                     "SELECT blob_hash FROM storage.cloud_files WHERE dir = $1 AND name = $2 AND blob_hash IS NOT NULL"
+                 )
+                 .bind(parent_dir)
+                 .bind(name)
+                 .fetch_optional(&self.db)
+                 .await
+                 .map_err(|e| DomainError::Database(e.to_string()))?;
+             } else {
+                 let target_user = if normalized_path.starts_with("/User/") {
+                      let parts: Vec<&str> = normalized_path.split('/').filter(|s| !s.is_empty()).collect();
+                      if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid path".to_string())); }
+                      parts[1].to_string()
+                 } else {
+                      return Err(DomainError::BadRequest("Invalid path".to_string()));
+                 };
+                 
+                 if target_user != username && username != "admin" {
+                       return Err(DomainError::Forbidden("Access denied".to_string()));
+                 }
+
+                 let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+                     .bind(&target_user)
+                     .fetch_one(&self.db)
+                     .await
+                     .map_err(|_| DomainError::NotFound(format!("User {} not found", target_user)))?;
+
+                 blob_hash = sqlx::query_scalar(
+                     "SELECT blob_hash FROM storage.cloud_files WHERE user_id = $1 AND dir = $2 AND name = $3 AND blob_hash IS NOT NULL"
+                 )
+                 .bind(user_id)
+                 .bind(parent_dir)
+                 .bind(name)
+                 .fetch_optional(&self.db)
+                 .await
+                 .map_err(|e| DomainError::Database(e.to_string()))?;
+             }
+
+             op_path = match blob_hash {
+                 Some(hash) if !hash.is_empty() => format!("vol1/blobs/{}/{}/{}", &hash[0..2], &hash[2..4], &hash),
+                 _ => self.resolve_opendal_path(username, &normalized_path).await?,
+             };
         }
+        
+        let full_path = Path::new(&self.storage_path).join(op_path);
+        Ok(full_path)
+    }
+
+    async fn commit_blob_change(&self, username: &str, virtual_path: &str, temp_path: &Path) -> Result<()> {
+        let normalized_path = self.normalize_path(virtual_path);
+        let path = Path::new(&normalized_path);
+        let parent_dir = path.parent().and_then(|p| p.to_str()).unwrap_or("/");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        if name.is_empty() {
+             return Err(DomainError::BadRequest("Invalid path".to_string()));
+        }
+
+        self.save_file_from_path(username, parent_dir, name, temp_path).await
     }
 
     async fn save_file(&self, username: &str, parent_virtual_path: &str, name: &str, data: bytes::Bytes) -> Result<()> {
         let normalized_parent = self.normalize_path(parent_virtual_path);
 
         if normalized_parent.starts_with("/AppData") {
-            let physical_parent = self.resolve_physical_path(username, &normalized_parent).await?;
-            let physical_path = physical_parent.join(name);
-            if let Some(parent) = physical_path.parent() {
-                fs::create_dir_all(parent).await.map_err(|e| DomainError::Io(e.to_string()))?;
-            }
-            fs::write(&physical_path, &data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            let op_path = self.resolve_opendal_path(username, &normalized_parent).await?;
+            // OpenDAL writes create parents automatically usually, but let's be explicit if needed.
+            // Actually, we can just write to parent/name.
+            let full_op_path = format!("{}/{}", op_path, name);
+            self.op.write(&full_op_path, data).await.map_err(|e| DomainError::Io(e.to_string()))?;
             return Ok(());
         }
 
@@ -697,20 +776,16 @@ impl StorageService for StorageServiceImpl {
         }
 
         // User files are stored in the blob store
+        let size = data.len() as i64;
+
         let mut hasher = Sha256::new();
         hasher.update(&data);
         let blob_hash = format!("{:x}", hasher.finalize());
 
-        let blob_dir = Path::new(&self.storage_path)
-            .join("vol1/blobs")
-            .join(&blob_hash[0..2])
-            .join(&blob_hash[2..4]);
-        
-        fs::create_dir_all(&blob_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        let blob_path = blob_dir.join(&blob_hash);
+        let blob_rel_path = format!("vol1/blobs/{}/{}/{}", &blob_hash[0..2], &blob_hash[2..4], &blob_hash);
 
-        if fs::metadata(&blob_path).await.is_err() {
-            fs::write(&blob_path, &data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        if self.op.stat(&blob_rel_path).await.is_err() {
+             self.op.write(&blob_rel_path, data).await.map_err(|e| DomainError::Io(e.to_string()))?;
         }
 
         let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
@@ -719,7 +794,6 @@ impl StorageService for StorageServiceImpl {
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
             
-        let size = data.len() as i64;
         let mime = mime_guess::from_path(name).first_or_octet_stream().to_string();
 
         sqlx::query(
@@ -733,6 +807,86 @@ impl StorageService for StorageServiceImpl {
         .bind(name)
         .bind(&normalized_parent)
         .bind(size)
+        .bind(mime)
+        .bind(&blob_hash)
+        .execute(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+        
+        Ok(())
+    }
+
+    async fn save_file_from_path(&self, username: &str, parent_virtual_path: &str, name: &str, temp_path: &Path) -> Result<()> {
+        let normalized_parent = self.normalize_path(parent_virtual_path);
+
+        if normalized_parent.starts_with("/AppData") {
+            let op_path = self.resolve_opendal_path(username, &normalized_parent).await?;
+            let full_op_path = format!("{}/{}", op_path, name);
+            
+            let mut file = tokio::fs::File::open(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            let mut writer = self.op.writer(&full_op_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            tokio::io::copy(&mut file, &mut writer).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            writer.close().await.map_err(|e| DomainError::Io(e.to_string()))?;
+            
+            return Ok(());
+        }
+
+        let target_user = if normalized_parent.starts_with("/System") {
+             if username != "admin" { return Err(DomainError::Forbidden("Only admin can modify /System".to_string())); }
+             "admin".to_string()
+        } else if normalized_parent.starts_with("/User/") {
+             let parts: Vec<&str> = normalized_parent.split('/').filter(|s| !s.is_empty()).collect();
+             if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid path".to_string())); }
+             parts[1].to_string()
+        } else {
+             return Err(DomainError::BadRequest("Invalid path".to_string()));
+        };
+        
+        if target_user != username && username != "admin" {
+             return Err(DomainError::Forbidden("Access denied".to_string()));
+        }
+
+        // Calculate SHA256 and size
+        let mut file = tokio::fs::File::open(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192];
+        use tokio::io::AsyncReadExt;
+        loop {
+            let n = file.read(&mut buffer).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            if n == 0 { break; }
+            hasher.update(&buffer[..n]);
+        }
+        let blob_hash = format!("{:x}", hasher.finalize());
+        let size = file.metadata().await.map_err(|e| DomainError::Io(e.to_string()))?.len();
+
+        let blob_rel_path = format!("vol1/blobs/{}/{}/{}", &blob_hash[0..2], &blob_hash[2..4], &blob_hash);
+
+        if self.op.stat(&blob_rel_path).await.is_err() {
+             let mut file = tokio::fs::File::open(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+             let mut writer = self.op.writer(&blob_rel_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+             tokio::io::copy(&mut file, &mut writer).await.map_err(|e| DomainError::Io(e.to_string()))?;
+             writer.close().await.map_err(|e| DomainError::Io(e.to_string()))?;
+        }
+
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(&target_user)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+            
+        let mime = mime_guess::from_path(name).first_or_octet_stream().to_string();
+
+        sqlx::query(
+            "insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage, blob_hash) 
+             values ($1, $2, $3, $4, $5, $6, 'blob', $7) 
+             on conflict (user_id, dir, name) 
+             do update set size = EXCLUDED.size, mime = EXCLUDED.mime, blob_hash = EXCLUDED.blob_hash, updated_at = CURRENT_TIMESTAMP"
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(user_id)
+        .bind(name)
+        .bind(&normalized_parent)
+        .bind(size as i64)
         .bind(mime)
         .bind(&blob_hash)
         .execute(&self.db)
@@ -763,12 +917,8 @@ impl StorageService for StorageServiceImpl {
                                 .await
                                 .unwrap_or(0);
                             if cnt == 0 {
-                                let blob_path = Path::new(&self.storage_path)
-                                    .join("vol1/blobs")
-                                    .join(&hash[0..2])
-                                    .join(&hash[2..4])
-                                    .join(&hash);
-                                let _ = fs::remove_file(blob_path).await;
+                                let blob_path = format!("vol1/blobs/{}/{}/{}", &hash[0..2], &hash[2..4], &hash);
+                                let _ = self.op.delete(&blob_path).await;
                             }
                         }
                     }
@@ -776,173 +926,6 @@ impl StorageService for StorageServiceImpl {
                 }
             }
         }
-    }
-
-    async fn sync_external_change(&self, physical_path: &Path) -> Result<()> {
-        if let Some(info) = self.parse_physical_path(physical_path).await? {
-            let exists: bool = sqlx::query_scalar("select count(*) > 0 from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
-                .bind(info.user_id)
-                .bind(&info.parent_dir)
-                .bind(&info.name)
-                .fetch_one(&self.db)
-                .await
-                .map_err(|e| DomainError::Database(e.to_string()))?;
-
-            if exists {
-                sqlx::query("update storage.cloud_files set size = $1, mime = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
-                    .bind(info.size)
-                    .bind(&info.mime)
-                    .bind(info.user_id)
-                    .bind(&info.parent_dir)
-                    .bind(&info.name)
-                    .execute(&self.db)
-                    .await
-                    .map_err(|e| DomainError::Database(e.to_string()))?;
-            } else {
-                sqlx::query("insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-                    .bind(uuid::Uuid::new_v4())
-                    .bind(info.user_id)
-                    .bind(&info.name)
-                    .bind(&info.parent_dir)
-                    .bind(info.size)
-                    .bind(&info.mime)
-                    .bind(&info.storage_type)
-                    .execute(&self.db)
-                    .await
-                    .map_err(|e| DomainError::Database(e.to_string()))?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn remove_external_change(&self, physical_path: &Path) -> Result<()> {
-        if let Some(info) = self.parse_physical_path(physical_path).await? {
-            sqlx::query("delete from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
-                .bind(info.user_id)
-                .bind(&info.parent_dir)
-                .bind(&info.name)
-                .execute(&self.db)
-                .await
-                .map_err(|e| DomainError::Database(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    async fn move_external_change(&self, from: &Path, to: &Path) -> Result<()> {
-        let from_info = self.parse_physical_path(from).await?;
-        let to_info = self.parse_physical_path(to).await?;
-
-        match (from_info, to_info) {
-            (Some(f), Some(t)) if f.user_id == t.user_id => {
-                let res = sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
-                    .bind(&t.parent_dir)
-                    .bind(&t.name)
-                    .bind(f.user_id)
-                    .bind(&f.parent_dir)
-                    .bind(&f.name)
-                    .execute(&self.db)
-                    .await
-                    .map_err(|e| DomainError::Database(e.to_string()))?;
-
-                if res.rows_affected() == 0 {
-                    self.sync_external_change(to).await?;
-                }
-            }
-            (Some(_), _) => {
-                self.remove_external_change(from).await?;
-                self.sync_external_change(to).await?;
-            }
-            (_, Some(_)) => {
-                self.sync_external_change(to).await?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn update_file_metadata(&self, username: &str, virtual_path: &str, size: i64) -> Result<()> {
-        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-            .bind(username)
-            .fetch_one(&self.db)
-            .await
-            .map_err(|_| DomainError::NotFound(format!("User {} not found", username)))?;
-
-        let clean_path = self.normalize_path(virtual_path);
-        let name = Path::new(&clean_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let parent_dir = Path::new(&clean_path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string());
-        let parent_dir = if parent_dir.is_empty() { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
-
-        sqlx::query("update storage.cloud_files set size = $1, updated_at = CURRENT_TIMESTAMP where user_id = $2 and dir = $3 and name = $4")
-            .bind(size)
-            .bind(user_id)
-            .bind(parent_dir)
-            .bind(name)
-            .execute(&self.db)
-            .await
-            .map_err(|e| DomainError::Database(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn commit_blob_change(&self, username: &str, virtual_path: &str, temp_path: &Path) -> Result<()> {
-        // 1. Calculate SHA256 of temp file
-        let mut file = tokio::fs::File::open(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0; 8192];
-        use tokio::io::AsyncReadExt;
-        loop {
-            let n = file.read(&mut buffer).await.map_err(|e| DomainError::Io(e.to_string()))?;
-            if n == 0 { break; }
-            hasher.update(&buffer[..n]);
-        }
-        let hash = format!("{:x}", hasher.finalize());
-        let size = file.metadata().await.map_err(|e| DomainError::Io(e.to_string()))?.len();
-        
-        // 2. Determine new blob path
-        let prefix1 = &hash[0..2];
-        let prefix2 = &hash[2..4];
-        let blob_dir = Path::new(&self.storage_path).join("vol1/blobs").join(prefix1).join(prefix2);
-        tokio::fs::create_dir_all(&blob_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        let blob_path = blob_dir.join(&hash);
-
-        // 3. Move temp file to blob path (or delete if exists)
-        if blob_path.exists() {
-            tokio::fs::remove_file(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        } else {
-            if let Err(e) = tokio::fs::rename(temp_path, &blob_path).await {
-                let is_cross_device = e.raw_os_error() == Some(18); // EXDEV
-                if is_cross_device {
-                     tokio::fs::copy(temp_path, &blob_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-                     tokio::fs::remove_file(temp_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-                } else {
-                    return Err(DomainError::Io(e.to_string()));
-                }
-            }
-        }
-
-        // 4. Update DB
-        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-            .bind(username)
-            .fetch_one(&self.db)
-            .await
-            .map_err(|_| DomainError::NotFound(format!("User {} not found", username)))?;
-
-        let clean_path = self.normalize_path(virtual_path);
-        let name = Path::new(&clean_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let parent_dir = Path::new(&clean_path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string());
-        let parent_dir = if parent_dir.is_empty() { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
-
-        sqlx::query("update storage.cloud_files set blob_hash = $1, size = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
-            .bind(hash)
-            .bind(size as i64)
-            .bind(user_id)
-            .bind(parent_dir)
-            .bind(name)
-            .execute(&self.db)
-            .await
-            .map_err(|e| DomainError::Database(e.to_string()))?;
-
-        Ok(())
     }
 
     async fn initiate_multipart_upload(&self, username: &str, parent_virtual_path: &str, name: &str) -> Result<String> {
@@ -987,13 +970,11 @@ impl StorageService for StorageServiceImpl {
         let etag = format!("{:x}", hasher.finalize());
 
         // 3. Save part to temporary location
-        let temp_dir = Path::new(&self.storage_path).join("vol1/tmp/multipart").join(upload_id);
-        fs::create_dir_all(&temp_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        let part_path = temp_dir.join(part_number.to_string());
-        fs::write(&part_path, &data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        let size = data.len() as i64;
+        let part_rel_path = format!("vol1/tmp/multipart/{}/{}", upload_id, part_number);
+        self.op.write(&part_rel_path, data).await.map_err(|e| DomainError::Io(e.to_string()))?;
 
         // 4. Record part info in the database
-        let size = data.len() as i64;
         sqlx::query(
             "INSERT INTO storage.upload_parts (upload_id, part_number, etag, size) VALUES ($1, $2, $3, $4)
              ON CONFLICT (upload_id, part_number) DO UPDATE SET etag = EXCLUDED.etag, size = EXCLUDED.size"
@@ -1047,18 +1028,16 @@ impl StorageService for StorageServiceImpl {
         let final_hash = format!("{:x}", final_hasher.finalize());
 
         // 4. Merge parts into final blob
-        let blob_dir = Path::new(&self.storage_path).join("vol1/blobs").join(&final_hash[0..2]).join(&final_hash[2..4]);
-        fs::create_dir_all(&blob_dir).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        let blob_path = blob_dir.join(&final_hash);
+        let blob_rel_path = format!("vol1/blobs/{}/{}/{}", &final_hash[0..2], &final_hash[2..4], &final_hash);
 
-        if fs::metadata(&blob_path).await.is_err() {
-            let temp_dir = Path::new(&self.storage_path).join("vol1/tmp/multipart").join(upload_id);
-            let mut dest_file = fs::File::create(&blob_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        if self.op.stat(&blob_rel_path).await.is_err() {
+            let mut writer = self.op.writer(&blob_rel_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
             for (part_number, _, _) in &db_parts {
-                let part_path = temp_dir.join(part_number.to_string());
-                let mut part_file = fs::File::open(&part_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-                tokio::io::copy(&mut part_file, &mut dest_file).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                let part_rel_path = format!("vol1/tmp/multipart/{}/{}", upload_id, part_number);
+                let mut reader = self.op.reader(&part_rel_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                tokio::io::copy(&mut reader, &mut writer).await.map_err(|e| DomainError::Io(e.to_string()))?;
             }
+            writer.close().await.map_err(|e| DomainError::Io(e.to_string()))?;
         }
 
         // 5. Update metadata in cloud_files
@@ -1083,70 +1062,14 @@ impl StorageService for StorageServiceImpl {
 
         // 6. Cleanup
         sqlx::query("DELETE FROM storage.multipart_uploads WHERE upload_id = $1").bind(upload_id).execute(&self.db).await.ok();
-        let temp_dir = Path::new(&self.storage_path).join("vol1/tmp/multipart").join(upload_id);
-        fs::remove_dir_all(temp_dir).await.ok();
+        self.op.remove_all(&format!("vol1/tmp/multipart/{}", upload_id)).await.ok();
 
         Ok(())
     }
 
-    async fn abort_multipart_upload(&self, _username: &str, _upload_id: &str) -> Result<()> {
-        todo!()
-    }
-}
-
-struct ExternalFileInfo {
-    user_id: uuid::Uuid,
-    parent_dir: String,
-    name: String,
-    size: i64,
-    mime: String,
-    storage_type: String,
-}
-
-impl StorageServiceImpl {
-    async fn parse_physical_path(&self, path: &Path) -> Result<Option<ExternalFileInfo>> {
-        let storage_base = Path::new(&self.storage_path).join("vol1/User");
-        let rel_path = match path.strip_prefix(&storage_base) {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
-        };
-
-        let parts: Vec<String> = rel_path.iter().map(|s| s.to_string_lossy().into_owned()).collect();
-        if parts.is_empty() { return Ok(None); }
-
-        let username = &parts[0];
-        let virtual_parts = if parts.len() > 1 { &parts[1..] } else { &[] };
-        let virtual_path = format!("/{}", virtual_parts.join("/"));
-
-        let user_id: Option<uuid::Uuid> = sqlx::query_scalar("select id from sys.users where username = $1")
-            .bind(username)
-            .fetch_optional(&self.db)
-            .await
-            .map_err(|e| DomainError::Database(e.to_string()))?;
-
-        let user_id = match user_id {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-
-        let name = Path::new(&virtual_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if name.is_empty() || name.starts_with('.') { return Ok(None); }
-
-        let parent_dir = Path::new(&virtual_path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string());
-        let parent_dir = if parent_dir.is_empty() { "/".to_string() } else if parent_dir.starts_with('/') { parent_dir } else { format!("/{}", parent_dir) };
-
-        let is_dir = path.is_dir();
-        let size = if is_dir { 0 } else { fs::metadata(path).await.map(|m| m.len() as i64).unwrap_or(0) };
-        let storage_type = if is_dir { "dir" } else { "file" };
-        let mime = if is_dir { "inode/directory".to_string() } else { mime_guess::from_path(path).first_or_octet_stream().to_string() };
-
-        Ok(Some(ExternalFileInfo {
-            user_id,
-            parent_dir,
-            name,
-            size,
-            mime,
-            storage_type: storage_type.to_string(),
-        }))
+    async fn abort_multipart_upload(&self, _username: &str, upload_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM storage.multipart_uploads WHERE upload_id = $1").bind(upload_id).execute(&self.db).await.map_err(|e| DomainError::Database(e.to_string()))?;
+        self.op.remove_all(&format!("vol1/tmp/multipart/{}", upload_id)).await.ok();
+        Ok(())
     }
 }
