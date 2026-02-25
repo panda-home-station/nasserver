@@ -4,4 +4,5 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: PHS
+Depends: postgresql
 Description: Panda Home Station NAS server
