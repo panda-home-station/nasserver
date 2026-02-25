@@ -25,32 +25,6 @@ async fn main() {
         storage_service.run_trash_purger().await;
     });
 
-    /*
-    // 2.5 Mount FUSE for all existing users
-    let db = state.db.clone();
-    let blob_fs = state.blob_fs_service.clone();
-    tokio::spawn(async move {
-        // Wait a short time for DB to be fully ready (though init() already ensures connection)
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        
-        match sqlx::query("SELECT username FROM users").fetch_all(&db).await {
-            Ok(rows) => {
-                for row in rows {
-                    let username: String = row.get("username");
-                    if let Err(e) = blob_fs.mount_for_user(&username).await {
-                        tracing::error!("Failed to mount blob storage for user {}: {}", username, e);
-                    } else {
-                        tracing::info!("Mounted blob storage for user {}", username);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch users for FUSE mounting: {}", e);
-            }
-        }
-    });
-    */
-
     // 3. Start Static Server
     let static_port: u16 = std::env::var("PNAS_STATIC_PORT")
         .ok()
@@ -66,7 +40,7 @@ async fn main() {
     });
 
     // 4. Start API Server
-    let port: u16 = std::env::var("PNAS_PORT")
+    let port: u16 = std::env::var("PNAS_API_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(8000);

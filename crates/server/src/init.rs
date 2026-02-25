@@ -13,8 +13,8 @@ use task::TaskServiceImpl;
 pub async fn init() -> AppState {
     dotenvy::dotenv().ok();
 
-    let storage_path = std::env::var("PNAS_DEV_STORAGE_PATH")
-        .or_else(|_| config::read_env_var_from_file("PNAS_DEV_STORAGE_PATH"))
+    let storage_path = std::env::var("PNAS_STORAGE_PATH")
+        .or_else(|_| config::read_env_var_from_file("PNAS_STORAGE_PATH"))
         .unwrap_or_else(|_| "/var/panda/system".to_string());
         
     let _ = std::fs::create_dir_all(&storage_path);
