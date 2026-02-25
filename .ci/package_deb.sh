@@ -26,6 +26,6 @@ cp "$DIR/systemd/phs-nasserver.service" "${PKG}/lib/systemd/system/phs-nasserver
 cp "$DIR/debian/control" "${PKG}/DEBIAN/control"
 cp "$DIR/debian/postinst" "${PKG}/DEBIAN/postinst"
 chmod 755 "${PKG}/DEBIAN/postinst"
-OUT="$(cd "$PROJ/../artifacts" 2>/dev/null || mkdir -p "$PROJ/../artifacts"; echo "$PROJ/../artifacts")"
+OUT="$(cd "$PROJ/artifacts" 2>/dev/null || mkdir -p "$PROJ/artifacts"; echo "$PROJ/artifacts")"
 dpkg-deb -b "$PKG" "${OUT}/nasserver_${VERSION}_${ARCH}.deb" >/dev/null
 echo "${OUT}/nasserver_${VERSION}_${ARCH}.deb"
