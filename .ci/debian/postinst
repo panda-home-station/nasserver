@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -e
+SUDO=""
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then SUDO="sudo"; fi
+# ensure system user and group
+if ! getent group nas >/dev/null 2>&1; then
+  groupadd --system nas
+fi
+if ! id -u nasserver >/dev/null 2>&1; then
+  useradd --system --gid nas --home-dir /var/lib/nasserver --no-create-home --shell /usr/sbin/nologin nasserver
+fi
+mkdir -p /var/lib/nasserver
+chown nasserver:nas /var/lib/nasserver || true
+# enable and start service
+systemctl daemon-reload || true
+systemctl enable --now phs-nasserver.service || true

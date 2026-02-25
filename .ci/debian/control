@@ -1,0 +1,7 @@
+Package: nasserver
+Version: 0.1.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: PHS
+Description: Panda Home Station NAS server
