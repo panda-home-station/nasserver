@@ -55,7 +55,7 @@ async fn main() {
     let static_port: u16 = std::env::var("PNAS_STATIC_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(6000);
+        .unwrap_or(8080);
     println!("Static listening on port {}", static_port);
     let static_addr: SocketAddr = ([0, 0, 0, 0], static_port).into();
     let static_app = api::static_app();
