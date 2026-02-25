@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use infra::{AppState, db, config, state::START_TIME};
+use infra::{AppState, db, state::START_TIME};
 
 use downloader::DownloaderServiceImpl;
 use container::{DockerAppManager, ContainerServiceImpl};
@@ -14,8 +14,7 @@ pub async fn init() -> AppState {
     dotenvy::dotenv().ok();
 
     let storage_path = std::env::var("PNAS_STORAGE_PATH")
-        .or_else(|_| config::read_env_var_from_file("PNAS_STORAGE_PATH"))
-        .unwrap_or_else(|_| "/var/panda/system".to_string());
+        .unwrap_or_else(|_| "fs".to_string());
         
     let _ = std::fs::create_dir_all(&storage_path);
     let _ = std::fs::create_dir_all(format!("{}/vol1", &storage_path));
