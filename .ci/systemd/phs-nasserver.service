@@ -9,7 +9,8 @@ WorkingDirectory=/var/lib/nasserver
 Environment=PGHOST=/var/run/postgresql
 Environment=PGUSER=nasserver
 Environment=PGDATABASE=pnas_db
-Environment=DATABASE_URL=postgresql://%2Fvar%2Frun%2Fpostgresql/pnas_db?user=nasserver
+Environment=DATABASE_URL=postgresql:///pnas_db?host=/var/run/postgresql&user=nasserver
+Environment=PNAS_DEV_STORAGE_PATH=/var/lib/nasserver/data
 Environment=STATIC_DIR=/usr/share/phs/webdesktop
 ExecStart=/usr/bin/nasserver
 Restart=on-failure

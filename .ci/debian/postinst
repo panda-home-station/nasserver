@@ -10,10 +10,15 @@ mkdir -p /var/lib/nasserver
 chown nasserver:nas /var/lib/nasserver || true
 systemctl enable --now postgresql || true
 if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='nasserver'\"" | grep -q 1; then
-  su - postgres -c "psql -tAc \"CREATE ROLE \\\"nasserver\\\" LOGIN\""
+  su - postgres -c "psql -tAc \"CREATE ROLE \\\"nasserver\\\" LOGIN CREATEROLE\""
+else
+  su - postgres -c "psql -tAc \"ALTER ROLE \\\"nasserver\\\" CREATEROLE\""
 fi
 if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='pnas_db'\"" | grep -q 1; then
   su - postgres -c "createdb -O \\\"nasserver\\\" \\\"pnas_db\\\""
 fi
+su - postgres -c "psql -tAc \"ALTER DATABASE \\\"pnas_db\\\" OWNER TO \\\"nasserver\\\"\"" || true
+su - postgres -c "psql -tAc \"GRANT ALL PRIVILEGES ON DATABASE \\\"pnas_db\\\" TO \\\"nasserver\\\"\"" || true
+su - postgres -c "psql -d pnas_db -tAc \"GRANT ALL ON SCHEMA public TO \\\"nasserver\\\"\"" || true
 systemctl daemon-reload || true
 systemctl enable --now phs-nasserver.service || true
