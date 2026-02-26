@@ -23,6 +23,267 @@ impl StorageServiceImpl {
         Self { db, op, storage_path }
     }
 
+    async fn blob_base(&self, username: &str) -> String {
+        format!("vol1/User/{}/.Trash/blobs", username)
+    }
+
+    async fn ensure_dir(&self, path: &str) {
+        let _ = self.op.create_dir(&format!("{}/", path)).await;
+    }
+
+    async fn hash_and_archive_file(&self, username: &str, virtual_path: &str) -> Result<(String, i64)> {
+        let op_src = self.resolve_opendal_path(username, virtual_path).await?;
+        let meta = self.op.stat(&op_src).await.map_err(|e| DomainError::Io(e.to_string()))?;
+        if !meta.mode().is_file() {
+            return Err(DomainError::BadRequest("Not a file".to_string()));
+        }
+        let size = meta.content_length() as i64;
+        // Use a random UUID string as blob id to avoid hashing cost
+        let hash = uuid::Uuid::new_v4().to_string();
+        let dest_base = self.blob_base(username).await;
+        let dest_path = format!("{}/{}", dest_base, &hash);
+        if let Some(parent) = Path::new(&dest_path).parent() {
+            let parent_str = parent.to_string_lossy().to_string();
+            self.ensure_dir(&parent_str).await;
+        }
+        // Move source object into blob store
+        self.op.rename(&op_src, &dest_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+
+        Ok((hash, size))
+    }
+
+    async fn upsert_trash_file_item(&self, username: &str, original_dir: &str, name: &str, mime: &str, hash: &str, size: i64) -> Result<()> {
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        sqlx::query("
+            insert into storage.trash_items(id, user_id, name, original_dir, is_dir, size, mime, blob_hash)
+            values ($1, $2, $3, $4, false, $5, $6, $7)
+        ")
+        .bind(uuid::Uuid::new_v4())
+        .bind(user_id)
+        .bind(name)
+        .bind(original_dir)
+        .bind(size)
+        .bind(mime)
+        .bind(hash)
+        .execute(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn insert_trash_dir_item(&self, username: &str, original_dir: &str, name: &str) -> Result<()> {
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+        sqlx::query("
+            insert into storage.trash_items(id, user_id, name, original_dir, is_dir, size, mime)
+            values ($1, $2, $3, $4, true, 0, 'inode/directory')
+            on conflict do nothing
+        ")
+        .bind(uuid::Uuid::new_v4())
+        .bind(user_id)
+        .bind(name)
+        .bind(original_dir)
+        .execute(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn trash_directory_recursive(&self, username: &str, full_path: &str) -> Result<()> {
+        // Iterative DFS to avoid async recursion
+        let mut stack: Vec<String> = vec![full_path.to_string()];
+        while let Some(curr) = stack.pop() {
+            let p = Path::new(&curr);
+            let parent = p.parent().and_then(|x| x.to_str()).unwrap_or("/");
+            let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
+            self.insert_trash_dir_item(username, parent, name).await?;
+
+            let src_op = self.resolve_opendal_path(username, &curr).await?;
+            let list_path = if src_op.ends_with('/') { src_op.clone() } else { format!("{}/", src_op) };
+            if let Ok(entries) = self.op.list(&list_path).await {
+                for e in entries {
+                    let child_name = e.name().to_string();
+                    if child_name.is_empty() || &child_name == "." { continue; }
+                    let child_virtual = if curr == "/" { format!("/{}", child_name) } else { format!("{}/{}", curr, child_name) };
+                    let is_dir = e.metadata().mode().is_dir();
+                    if is_dir {
+                        stack.push(child_virtual);
+                    } else {
+                        let mime = mime_guess::from_path(&child_name).first_or_octet_stream().to_string();
+                        let (hash, size) = self.hash_and_archive_file(username, &child_virtual).await?;
+                        self.upsert_trash_file_item(username, &curr, &child_name, &mime, &hash, size).await?;
+                    }
+                }
+            }
+            // Remove the now-empty directory
+            let _ = self.op.remove_all(&src_op).await;
+        }
+        Ok(())
+    }
+
+    async fn list_trash_dir(&self, username: &str, rel_dir: &str) -> Result<Vec<DocsEntry>> {
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+        let dir_key = if rel_dir.is_empty() { "/" } else { rel_dir };
+        // 1) Direct children (files/dirs explicitly deleted with this parent)
+        let direct_rows = sqlx::query("
+            select id, name, is_dir, size, mime, (extract(epoch from deleted_at))::float8 as ts
+            from storage.trash_items
+            where user_id = $1 and original_dir = $2
+        ")
+        .bind(user_id)
+        .bind(dir_key)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+        let mut entries: Vec<DocsEntry> = Vec::new();
+        let mut existing_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in &direct_rows {
+            let is_dir: bool = row.get("is_dir");
+            let name: String = row.get("name");
+            let ts = row.get::<f64, _>("ts") as i64;
+            if is_dir {
+                existing_dirs.insert(name.clone());
+            }
+            entries.push(DocsEntry {
+                id: row.get::<uuid::Uuid, _>("id").to_string(),
+                name,
+                is_dir,
+                size: row.get("size"),
+                modified_ts: ts,
+                mime: row.get("mime"),
+            });
+        }
+        // 2) Virtual child directories inferred from deeper items
+        let like_pat = if dir_key == "/" { "/%".to_string() } else { format!("{}/%", dir_key) };
+        let deeper_rows = sqlx::query("
+            select original_dir, (extract(epoch from max(deleted_at)))::float8 as ts
+            from storage.trash_items
+            where user_id = $1 and original_dir like $2
+            group by original_dir
+        ")
+        .bind(user_id)
+        .bind(&like_pat)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+        let mut virtual_dirs: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for row in deeper_rows {
+            let od: String = row.get("original_dir");
+            let ts = row.get::<f64, _>("ts") as i64;
+            let rem = if dir_key == "/" {
+                od.trim_start_matches('/').to_string()
+            } else {
+                od.trim_start_matches(dir_key).trim_start_matches('/').to_string()
+            };
+            if rem.is_empty() { continue; }
+            let seg = rem.split('/').next().unwrap_or("");
+            if seg.is_empty() { continue; }
+            // Track the latest timestamp among children for display
+            let e = virtual_dirs.entry(seg.to_string()).or_insert(0);
+            if ts > *e { *e = ts; }
+        }
+        for (seg, ts) in virtual_dirs {
+            if !existing_dirs.contains(&seg) {
+                entries.push(DocsEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: seg,
+                    is_dir: true,
+                    size: 0,
+                    modified_ts: ts,
+                    mime: "inode/directory".to_string(),
+                });
+            }
+        }
+        // Sort: directories first, then by name
+        entries.sort_by(|a, b| {
+            match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            }
+        });
+        Ok(entries)
+    }
+
+    async fn delete_trash_item_recursive(&self, username: &str, rel_dir: &str, name: &str) -> Result<()> {
+        let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+            .bind(username)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+        let row = sqlx::query("
+            select id, is_dir, blob_hash from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3
+        ")
+        .bind(user_id)
+        .bind(if rel_dir.is_empty() { "/" } else { rel_dir })
+        .bind(name)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+        if row.is_none() { return Ok(()); }
+        let row = row.unwrap();
+        let is_dir: bool = row.get("is_dir");
+        if is_dir {
+            let base = if rel_dir.is_empty() { format!("/{}", name) } else { format!("{}/{}", rel_dir, name) };
+            // Collect all file items under subtree to delete blob files
+            let files = sqlx::query("
+                select blob_hash from storage.trash_items where user_id = $1 and is_dir = false and (original_dir = $2 or original_dir like $3)
+            ")
+            .bind(user_id)
+            .bind(&base)
+            .bind(&format!("{}/%", base))
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+            for f in files {
+                let blob: Option<String> = f.get("blob_hash");
+                if let Some(bhash) = blob {
+                    // remove blob file
+                    let blob_path = format!("{}/{bhash}", self.blob_base(username).await);
+                    let _ = self.op.delete(&blob_path).await;
+                }
+            }
+            let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and (original_dir = $2 or original_dir like $3)")
+                .bind(user_id)
+                .bind(&base)
+                .bind(&format!("{}/%", base))
+                .execute(&self.db)
+                .await;
+            // Also delete the directory node itself
+            let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3 and is_dir = true")
+                .bind(user_id)
+                .bind(if rel_dir.is_empty() { "/" } else { rel_dir })
+                .bind(name)
+                .execute(&self.db)
+                .await;
+        } else {
+            let blob: Option<String> = row.get("blob_hash");
+            let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3 and is_dir = false")
+                .bind(user_id)
+                .bind(if rel_dir.is_empty() { "/" } else { rel_dir })
+                .bind(name)
+                .execute(&self.db)
+                .await;
+            if let Some(bhash) = blob {
+                let blob_path = format!("{}/{bhash}", self.blob_base(username).await);
+                let _ = self.op.delete(&blob_path).await;
+            }
+        }
+        Ok(())
+    }
+
     fn normalize_path(&self, p: &str) -> String {
         let s = if p.starts_with('/') { &p[1..] } else { p };
         let s = s.replace("\\", "/");
@@ -73,7 +334,32 @@ impl StorageServiceImpl {
             if rel.is_empty() {
                 Ok(format!("vol1/User/{}/.Trash", username))
             } else {
-                Ok(format!("vol1/User/{}/.Trash/{}", username, rel))
+                let first = rel.split('/').next().unwrap_or("");
+                let is_date = first.len() == 8 && first.chars().all(|c| c.is_ascii_digit());
+                if is_date {
+                    Ok(format!("vol1/User/{}/.Trash/{}", username, rel))
+                } else {
+                    let base = format!("vol1/User/{}/.Trash", username);
+                    let mut matches = Vec::new();
+                    if let Ok(op_entries) = self.op.list(&(base.clone() + "/")).await {
+                        for entry in op_entries {
+                            let n = entry.name().to_string();
+                            if n.len() == 8 && n.chars().all(|c| c.is_ascii_digit()) && entry.metadata().mode().is_dir() {
+                                let cand = format!("{}/{}/{}", base, n, rel);
+                                if self.op.stat(&cand).await.is_ok() || self.op.stat(&(cand.clone() + "/")).await.is_ok() {
+                                    matches.push(cand);
+                                }
+                            }
+                        }
+                    }
+                    if matches.len() == 1 {
+                        Ok(matches.remove(0))
+                    } else if matches.is_empty() {
+                        Ok(format!("{}/{}", base, rel))
+                    } else {
+                        Err(DomainError::BadRequest("Ambiguous /Trash path; please include YYYYMMDD".to_string()))
+                    }
+                }
             }
         } else if clean_path.starts_with("/User/") {
             let parts: Vec<&str> = clean_path.split('/').filter(|x| !x.is_empty()).collect();
@@ -138,6 +424,14 @@ impl StorageService for StorageServiceImpl {
                 mime: "inode/directory".to_string(),
             }).collect();
 
+            return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
+        }
+
+        if dir == "/Trash" || dir.starts_with("/Trash/") {
+            // DB-driven Trash view, mirroring original_dir tree under /Trash
+            let rel = dir.trim_start_matches("/Trash");
+            let rel_dir = rel.trim_start_matches('/');
+            let entries = self.list_trash_dir(username, rel_dir).await?;
             return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
         }
 
@@ -323,6 +617,178 @@ impl StorageService for StorageServiceImpl {
         let to_parent = to_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
         let to_name = to_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid to path".to_string()))?;
 
+        // Restore from Trash
+        if from_path.starts_with("/Trash") {
+            let from_obj = Path::new(&from_path);
+            let rel_parent = from_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
+            let rel_parent = rel_parent.trim_start_matches("/Trash").trim_start_matches('/');
+            let from_name = from_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid from path".to_string()))?;
+
+            // Destination must be /User/... or /System
+            let to_user = if to_path.starts_with("/System") {
+                "admin".to_string()
+            } else if to_path.starts_with("/User/") {
+                let parts: Vec<&str> = to_path.split('/').filter(|s| !s.is_empty()).collect();
+                if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid to path".to_string())); }
+                parts[1].to_string()
+            } else {
+                return Err(DomainError::BadRequest("Invalid to path".to_string()));
+            };
+            if to_user != username && username != "admin" {
+                return Err(DomainError::Forbidden("Access denied".to_string()));
+            }
+            // Query item
+            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+                .bind(username)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+            let item = sqlx::query("select id, is_dir, blob_hash from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3")
+                .bind(user_id)
+                .bind(if rel_parent.is_empty() { "/" } else { rel_parent })
+                .bind(from_name)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+            if item.is_none() { return Err(DomainError::BadRequest("Trash item not found".to_string())); }
+            let item = item.unwrap();
+            let is_dir: bool = item.get("is_dir");
+            let to_obj = Path::new(&to_path);
+            let to_parent = to_obj.parent().and_then(|p| p.to_str()).unwrap_or("/");
+            let to_name = to_obj.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid to path".to_string()))?;
+
+            if is_dir {
+                // Restore directory subtree
+                let from_root = if rel_parent.is_empty() { format!("/{}", from_name) } else { format!("{}/{}", rel_parent, from_name) };
+                // Ensure destination directory exists
+                let to_op_parent = self.resolve_opendal_path(&to_user, to_parent).await?;
+                let _ = self.op.create_dir(&format!("{}/", to_op_parent)).await;
+                // Fetch all items under subtree ordered by original_dir depth (dirs first)
+                let rows = sqlx::query("
+                    select name, original_dir, is_dir, blob_hash, mime, size
+                    from storage.trash_items where user_id = $1 and (original_dir = $2 or original_dir like $3)
+                    order by is_dir desc, original_dir asc, name asc
+                ")
+                .bind(user_id)
+                .bind(&from_root)
+                .bind(&format!("{}/%", from_root))
+                .fetch_all(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+                for row in &rows {
+                    let cname: String = row.get("name");
+                    let cdir: String = row.get("original_dir");
+                    let rel_tail = cdir.strip_prefix(&from_root).unwrap_or("").trim_start_matches('/');
+                    let dest_parent = if rel_tail.is_empty() {
+                        to_path.clone()
+                    } else {
+                        if to_path == "/" { format!("/{}", rel_tail) } else { format!("{}/{}", to_path, rel_tail) }
+                    };
+                    let is_dir: bool = row.get("is_dir");
+                    if is_dir {
+                        // create directory both physically and in cloud_files
+                        let dest_virtual = if dest_parent == "/" { format!("/{}", cname) } else { format!("{}/{}", dest_parent, cname) };
+                        let op_dir = self.resolve_opendal_path(&to_user, &dest_virtual).await?;
+                        let _ = self.op.create_dir(&format!("{}/", op_dir)).await;
+                        let dest_parent_only = Path::new(&dest_virtual).parent().and_then(|p| p.to_str()).unwrap_or("/");
+                        let u: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1").bind(&to_user).fetch_one(&self.db).await.map_err(|e| DomainError::Database(e.to_string()))?;
+                        let _ = sqlx::query("insert into storage.cloud_files (id, user_id, name, dir, size, mime, storage) values ($1,$2,$3,$4,0,'inode/directory','virtual') on conflict do nothing")
+                            .bind(uuid::Uuid::new_v4())
+                            .bind(u)
+                            .bind(cname.clone())
+                            .bind(dest_parent_only)
+                            .execute(&self.db)
+                            .await;
+                    } else {
+                        let blob: Option<String> = row.get("blob_hash");
+                        if let Some(hash) = blob {
+                            let dest_virtual = if dest_parent == "/" { format!("/{}", cname) } else { format!("{}/{}", dest_parent, cname) };
+                            let dest_op = self.resolve_opendal_path(&to_user, &dest_virtual).await?;
+                            if let Some(parent) = Path::new(&dest_op).parent() {
+                                let parent_str = parent.to_string_lossy().to_string();
+                                let _ = self.op.create_dir(&format!("{}/", parent_str)).await;
+                            }
+                            let blob_path = format!("{}/{}", self.blob_base(username).await, hash);
+                            let data = self.op.read(&blob_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                            self.op.write(&dest_op, data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                            // upsert cloud_files
+                            let u: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1").bind(&to_user).fetch_one(&self.db).await.map_err(|e| DomainError::Database(e.to_string()))?;
+                            let mime = mime_guess::from_path(&cname).first_or_octet_stream().to_string();
+                            let size: i64 = row.get("size");
+                            let _ = sqlx::query("
+                                insert into storage.cloud_files(id,user_id,name,dir,size,mime,storage) values($1,$2,$3,$4,$5,$6,'file')
+                                on conflict (user_id,dir,name) do update set size=EXCLUDED.size,mime=EXCLUDED.mime,updated_at=CURRENT_TIMESTAMP
+                            ")
+                            .bind(uuid::Uuid::new_v4())
+                            .bind(u)
+                            .bind(&cname)
+                            .bind(&dest_parent)
+                            .bind(size)
+                            .bind(mime)
+                            .execute(&self.db)
+                            .await;
+                        }
+                    }
+                }
+                // After restoring, delete file blobs (no refcount now)
+                for row in rows {
+                    if !row.get::<bool,_>("is_dir") {
+                        if let Some(hash) = row.get::<Option<String>,_>("blob_hash") {
+                            let blob_path = format!("{}/{}", self.blob_base(username).await, hash);
+                            let _ = self.op.delete(&blob_path).await;
+                        }
+                    }
+                }
+                let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and (original_dir = $2 or original_dir like $3)")
+                    .bind(user_id)
+                    .bind(&from_root)
+                    .bind(&format!("{}/%", from_root))
+                    .execute(&self.db)
+                    .await;
+                let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3 and is_dir = true")
+                    .bind(user_id)
+                    .bind(if rel_parent.is_empty() { "/" } else { rel_parent })
+                    .bind(from_name)
+                    .execute(&self.db)
+                    .await;
+            } else {
+                // Restore single file
+                let hash: Option<String> = item.get("blob_hash");
+                let hash = hash.ok_or_else(|| DomainError::Database("blob hash missing".to_string()))?;
+                let blob_path = format!("{}/{}", self.blob_base(username).await, hash);
+                let data = self.op.read(&blob_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                let dest_op_parent = self.resolve_opendal_path(&to_user, to_parent).await?;
+                let _ = self.op.create_dir(&format!("{}/", dest_op_parent)).await;
+                let dest_op = self.resolve_opendal_path(&to_user, &to_path).await?;
+                self.op.write(&dest_op, data).await.map_err(|e| DomainError::Io(e.to_string()))?;
+                // cloud_files upsert
+                let u: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1").bind(&to_user).fetch_one(&self.db).await.map_err(|e| DomainError::Database(e.to_string()))?;
+                let mime = mime_guess::from_path(to_name).first_or_octet_stream().to_string();
+                let size = self.op.stat(&dest_op).await.map_err(|e| DomainError::Io(e.to_string()))?.content_length() as i64;
+                sqlx::query("
+                    insert into storage.cloud_files(id,user_id,name,dir,size,mime,storage) values($1,$2,$3,$4,$5,$6,'file')
+                    on conflict (user_id,dir,name) do update set size=EXCLUDED.size,mime=EXCLUDED.mime,updated_at=CURRENT_TIMESTAMP
+                ")
+                .bind(uuid::Uuid::new_v4())
+                .bind(u)
+                .bind(to_name)
+                .bind(to_parent)
+                .bind(size)
+                .bind(mime)
+                .execute(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+                // remove item and delete blob file
+                let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3 and is_dir = false")
+                    .bind(user_id)
+                    .bind(if rel_parent.is_empty() { "/" } else { rel_parent })
+                    .bind(from_name)
+                    .execute(&self.db)
+                    .await;
+                let _ = self.op.delete(&blob_path).await;
+            }
+            return Ok(());
+        }
         if from_path.starts_with("/AppData") || to_path.starts_with("/AppData") {
             let from_op = self.resolve_opendal_path(username, &from_path).await?;
             let to_op = self.resolve_opendal_path(username, &to_path).await?;
@@ -431,55 +897,11 @@ impl StorageService for StorageServiceImpl {
             let op_path = self.resolve_opendal_path(username, &full_path).await?;
             self.op.remove_all(&op_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
         } else if full_path == "/Trash" || full_path.starts_with("/Trash/") {
-            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
-                .bind(username)
-                .fetch_one(&self.db)
-                .await
-                .map_err(|e| DomainError::Database(e.to_string()))?;
-
-            let row = sqlx::query("select id, mime from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
-                .bind(user_id)
-                .bind(parent)
-                .bind(name)
-                .fetch_optional(&self.db)
-                .await
-                .map_err(|e| DomainError::Database(e.to_string()))?;
-
-            if let Some(row) = row {
-                let id: uuid::Uuid = row.get("id");
-                let mime: String = row.get("mime");
-
-                let op_path = self.resolve_opendal_path(username, &full_path).await?;
-                if mime == "inode/directory" {
-                    let _ = self.op.remove_all(&op_path).await;
-                } else {
-                    let _ = self.op.delete(&op_path).await;
-                }
-
-                let _ = sqlx::query("delete from storage.cloud_files where id = $1")
-                    .bind(id)
-                    .execute(&self.db)
-                    .await;
-
-                if mime == "inode/directory" {
-                    let dir_path = format!("{}/{}", parent, name);
-                    let like_pat = format!("{}/%", dir_path);
-                    let rows = sqlx::query("select id from storage.cloud_files where user_id = $1 and (dir = $2 or dir like $3)")
-                        .bind(user_id)
-                        .bind(&dir_path)
-                        .bind(&like_pat)
-                        .fetch_all(&self.db)
-                        .await
-                        .unwrap_or_default();
-                    for r in rows {
-                        let cid: uuid::Uuid = r.get("id");
-                        let _ = sqlx::query("delete from storage.cloud_files where id = $1")
-                            .bind(cid)
-                            .execute(&self.db)
-                            .await;
-                    }
-                }
+            if full_path == "/Trash" {
+                return Err(DomainError::BadRequest("Cannot delete Trash root".to_string()));
             }
+            let rel_dir = parent.trim_start_matches("/Trash").trim_start_matches('/');
+            self.delete_trash_item_recursive(username, rel_dir, name).await?;
         } else {
             let target_user = if full_path.starts_with("/System") {
                  if username != "admin" { return Err(DomainError::Forbidden("Only admin can modify /System".to_string())); }
@@ -502,139 +924,36 @@ impl StorageService for StorageServiceImpl {
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
 
-            let mime_opt: Option<String> = sqlx::query_scalar("select mime from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
-                .bind(user_id)
-                .bind(parent)
-                .bind(name)
-                .fetch_optional(&self.db)
-                .await
-                .map_err(|e| DomainError::Database(e.to_string()))?;
-
-            let trash_base = format!("/Trash/{}", Utc::now().format("%Y%m%d"));
-            
-            // Determine target directory in trash
-            // If parent is "/", target is "/Trash/Date"
-            // If parent is "/A", target is "/Trash/Date/A"
-            let target_dir = if parent == "/" {
-                trash_base.clone()
-            } else {
-                format!("{}{}", trash_base, parent)
-            };
-
-            // Check for collision and resolve name
-            let mut final_name = name.to_string();
-            let mut i = 1;
-
-            loop {
-                let exists: bool = sqlx::query_scalar("select count(*) > 0 from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
+            // CAS Trash path
+            let op_src = self.resolve_opendal_path(&target_user, &full_path).await?;
+            let is_dir = self.op.stat(&op_src).await.map_err(|e| DomainError::Io(e.to_string()))?.mode().is_dir();
+            if is_dir {
+                self.trash_directory_recursive(&target_user, &full_path).await?;
+                // Remove from cloud_files for subtree
+                let like_pat = format!("{}/%", full_path);
+                let _ = sqlx::query("delete from storage.cloud_files where user_id = $1 and (dir = $2 or dir like $3)")
                     .bind(user_id)
-                    .bind(&target_dir)
-                    .bind(&final_name)
-                    .fetch_one(&self.db)
-                    .await
-                    .map_err(|e| DomainError::Database(e.to_string()))?;
-
-                if !exists {
-                    break;
-                }
-
-                let path = Path::new(name);
-                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-                let ext = path.extension().map(|e| e.to_string_lossy().to_string());
-
-                if let Some(e) = ext {
-                    final_name = format!("{} ({}).{}", stem, i, e);
-                } else {
-                    final_name = format!("{} ({})", stem, i);
-                }
-                i += 1;
-            }
-
-            if let Some(mime) = mime_opt {
-                if mime == "inode/directory" {
-                    let from_dir = full_path.clone();
-                    let like_pat = format!("{}/%", from_dir);
-                    
-                    // New root for children: target_dir / final_name
-                    let new_subtree_root = if target_dir == "/" {
-                        format!("/{}", final_name)
-                    } else {
-                        format!("{}/{}", target_dir, final_name)
-                    };
-
-                    let from_op = self.resolve_opendal_path(&target_user, &from_dir).await?;
-                    let to_op = self.resolve_opendal_path(&target_user, &new_subtree_root).await?;
-                    if let Some(parent) = Path::new(&to_op).parent() {
-                        let parent_str = parent.to_string_lossy().to_string();
-                        let _ = self.op.create_dir(&format!("{}/", parent_str)).await;
-                    }
-                    self.op.rename(&from_op, &to_op).await.map_err(|e| DomainError::Io(e.to_string()))?;
-
-                    // Update children (recursive)
-                    // We use substring to replace the old prefix (from_dir) with new_subtree_root
-                    sqlx::query("update storage.cloud_files set dir = $1 || substring(dir from length($2) + 1), updated_at = CURRENT_TIMESTAMP where user_id = $3 and (dir = $4 or dir like $5)")
-                        .bind(&new_subtree_root)
-                        .bind(&from_dir) 
-                        .bind(user_id)
-                        .bind(&from_dir)
-                        .bind(&like_pat)
-                        .execute(&self.db)
-                        .await
-                        .map_err(|e| DomainError::Database(e.to_string()))?;
-
-                    // Update directory itself
-                    sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
-                        .bind(&target_dir)
-                        .bind(&final_name)
-                        .bind(user_id)
-                        .bind(parent)
-                        .bind(name)
-                        .execute(&self.db)
-                        .await
-                        .map_err(|e| DomainError::Database(e.to_string()))?;
-                } else {
-                    // File
-                    let from_virtual = full_path.clone();
-                    let to_virtual = if target_dir == "/" { format!("/{}", final_name) } else { format!("{}/{}", target_dir, final_name) };
-                    let from_op = self.resolve_opendal_path(&target_user, &from_virtual).await?;
-                    let to_op = self.resolve_opendal_path(&target_user, &to_virtual).await?;
-                    if let Some(parent) = Path::new(&to_op).parent() {
-                        let parent_str = parent.to_string_lossy().to_string();
-                        let _ = self.op.create_dir(&format!("{}/", parent_str)).await;
-                    }
-                    self.op.rename(&from_op, &to_op).await.map_err(|e| DomainError::Io(e.to_string()))?;
-
-                    sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
-                        .bind(&target_dir)
-                        .bind(&final_name)
-                        .bind(user_id)
-                        .bind(parent)
-                        .bind(name)
-                        .execute(&self.db)
-                        .await
-                        .map_err(|e| DomainError::Database(e.to_string()))?;
-                }
-            } else {
-                 // Fallback if mime not found (treat as file/safe update)
-                 let from_virtual = full_path.clone();
-                 let to_virtual = if target_dir == "/" { format!("/{}", final_name) } else { format!("{}/{}", target_dir, final_name) };
-                 let from_op = self.resolve_opendal_path(&target_user, &from_virtual).await?;
-                 let to_op = self.resolve_opendal_path(&target_user, &to_virtual).await?;
-                 if let Some(parent) = Path::new(&to_op).parent() {
-                     let parent_str = parent.to_string_lossy().to_string();
-                     let _ = self.op.create_dir(&format!("{}/", parent_str)).await;
-                 }
-                 self.op.rename(&from_op, &to_op).await.map_err(|e| DomainError::Io(e.to_string()))?;
-
-                 sqlx::query("update storage.cloud_files set dir = $1, name = $2, updated_at = CURRENT_TIMESTAMP where user_id = $3 and dir = $4 and name = $5")
-                    .bind(&target_dir)
-                    .bind(&final_name)
+                    .bind(&full_path)
+                    .bind(&like_pat)
+                    .execute(&self.db)
+                    .await;
+                let _ = sqlx::query("delete from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
                     .bind(user_id)
                     .bind(parent)
                     .bind(name)
                     .execute(&self.db)
-                    .await
-                    .map_err(|e| DomainError::Database(e.to_string()))?;
+                    .await;
+            } else {
+                // single file
+                let mime = mime_guess::from_path(name).first_or_octet_stream().to_string();
+                let (hash, size) = self.hash_and_archive_file(&target_user, &full_path).await?;
+                self.upsert_trash_file_item(&target_user, parent, name, &mime, &hash, size).await?;
+                let _ = sqlx::query("delete from storage.cloud_files where user_id = $1 and dir = $2 and name = $3")
+                    .bind(user_id)
+                    .bind(parent)
+                    .bind(name)
+                    .execute(&self.db)
+                    .await;
             }
         }
 
@@ -647,7 +966,9 @@ impl StorageService for StorageServiceImpl {
         let normalized_path = self.normalize_path(virtual_path);
 
         // Permission check
-        if normalized_path.starts_with("/User/") {
+        if normalized_path.starts_with("/Trash") {
+            // Allow only self or admin to read blobs
+        } else if normalized_path.starts_with("/User/") {
             let parts: Vec<&str> = normalized_path.split('/').filter(|s| !s.is_empty()).collect();
             if parts.len() < 2 { return Err(DomainError::BadRequest("Invalid path".to_string())); }
             let u = parts[1];
@@ -659,11 +980,35 @@ impl StorageService for StorageServiceImpl {
                 // allow read for non-admin? keep strict
             }
         }
-
-        let op_path = self.resolve_opendal_path(username, &normalized_path).await?;
-
-        let reader = self.op.reader(&op_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
-        Ok(Box::new(reader))
+        if normalized_path.starts_with("/Trash") {
+            // Map /Trash/<rel_dir>/<name> to blob reader via DB
+            let p = Path::new(&normalized_path);
+            let parent = p.parent().and_then(|x| x.to_str()).unwrap_or("/");
+            let rel_parent = parent.trim_start_matches("/Trash").trim_start_matches('/');
+            let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
+            let user_id: uuid::Uuid = sqlx::query_scalar("select id from sys.users where username = $1")
+                .bind(username)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| DomainError::Database(e.to_string()))?;
+            let blob: Option<String> = sqlx::query_scalar("
+                select blob_hash from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3 and is_dir = false
+            ")
+            .bind(user_id)
+            .bind(if rel_parent.is_empty() { "/" } else { rel_parent })
+            .bind(name)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+            let hash = blob.ok_or_else(|| DomainError::BadRequest("Trash file not found".to_string()))?;
+            let blob_path = format!("{}/{}", self.blob_base(username).await, hash);
+            let reader = self.op.reader(&blob_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            return Ok(Box::new(reader));
+        } else {
+            let op_path = self.resolve_opendal_path(username, &normalized_path).await?;
+            let reader = self.op.reader(&op_path).await.map_err(|e| DomainError::Io(e.to_string()))?;
+            Ok(Box::new(reader))
+        }
 
     }
     async fn get_file_path(&self, username: &str, virtual_path: &str) -> Result<std::path::PathBuf> {
@@ -828,30 +1173,27 @@ impl StorageService for StorageServiceImpl {
     async fn run_trash_purger(&self) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(24 * 3600)).await;
+            // Delete trash items older than 30 days
             let rows = sqlx::query(
-                "select cf.id, cf.user_id, cf.dir, cf.name, cf.mime, u.username
-                 from storage.cloud_files cf
-                 join sys.users u on cf.user_id = u.id
-                 where cf.dir like '/Trash%' and cf.updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'"
+                "select ti.id, ti.is_dir, ti.blob_hash, u.username
+                 from storage.trash_items ti
+                 join sys.users u on ti.user_id = u.id
+                 where ti.deleted_at < CURRENT_TIMESTAMP - INTERVAL '30 days'"
             )
-                .fetch_all(&self.db)
-                .await
-                .unwrap_or_default();
+            .fetch_all(&self.db)
+            .await
+            .unwrap_or_default();
             for row in rows {
                 let id: uuid::Uuid = row.get("id");
-                let dir: String = row.get("dir");
-                let name: String = row.get("name");
-                let mime: String = row.get("mime");
+                let is_dir: bool = row.get("is_dir");
                 let username: String = row.get("username");
-                let virtual_path = if dir == "/" { format!("/{}", name) } else { format!("{}/{}", dir, name) };
-                if let Ok(op_path) = self.resolve_opendal_path(&username, &virtual_path).await {
-                    if mime == "inode/directory" {
-                        let _ = self.op.remove_all(&op_path).await;
-                    } else {
-                        let _ = self.op.delete(&op_path).await;
+                if !is_dir {
+                    if let Some(hash) = row.get::<Option<String>,_>("blob_hash") {
+                        let blob_path = format!("{}/{}", self.blob_base(&username).await, hash);
+                        let _ = self.op.delete(&blob_path).await;
                     }
                 }
-                let _ = sqlx::query("delete from storage.cloud_files where id = $1").bind(id).execute(&self.db).await;
+                let _ = sqlx::query("delete from storage.trash_items where id = $1").bind(id).execute(&self.db).await;
             }
         }
     }
