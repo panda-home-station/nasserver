@@ -50,7 +50,7 @@ impl DownloaderServiceImpl {
         };
         
         let parts: Vec<&str> = rel.split('/').filter(|x| !x.is_empty()).collect();
-        if parts.len() >= 3 && parts[0] == "vol1" && parts[1] == "User_Data" {
+        if parts.len() >= 3 && parts[0] == "vol1" && parts[1] == "User" {
             if parts.len() > 3 {
                  return format!("/{}", parts[3..].join("/"));
             }
@@ -215,7 +215,7 @@ impl DownloaderService for DownloaderServiceImpl {
         let user_id = self.get_user_id_by_username(username).await
             .ok_or_else(|| Error::NotFound("User not found".to_string()))?;
 
-        let save_dir = format!("{}/vol1/User_Data/{}/下载", self.storage_path, username);
+        let save_dir = format!("{}/vol1/User/{}/下载", self.storage_path, username);
         let _ = tokio::fs::create_dir_all(&save_dir).await;
         self.ensure_directory_exists(&user_id, "/下载").await;
 
@@ -458,9 +458,9 @@ impl DownloaderService for DownloaderServiceImpl {
         
         let base_save_dir = if let Some(p) = req.path {
             let relative_path = p.trim_start_matches('/');
-            format!("{}/vol1/User_Data/{}/{}", self.storage_path, username, relative_path)
+            format!("{}/vol1/User/{}/{}", self.storage_path, username, relative_path)
         } else {
-            let default_dir = format!("{}/vol1/User_Data/{}/下载", self.storage_path, username);
+            let default_dir = format!("{}/vol1/User/{}/下载", self.storage_path, username);
             self.ensure_directory_exists(&user_id, "/下载").await;
             default_dir
         };
@@ -581,7 +581,7 @@ impl DownloaderServiceImpl {
                 }
             };
             
-            let prefix = format!("{}/vol1/User_Data/{}", storage_path, username);
+            let prefix = format!("{}/vol1/User/{}", storage_path, username);
             let virtual_base_dir = if save_dir.starts_with(&prefix) {
                 save_dir[prefix.len()..].to_string()
             } else {
@@ -605,7 +605,7 @@ impl DownloaderServiceImpl {
 
         let id_clone = id.clone();
         let abort_handle = tokio::spawn(async move {
-            let prefix = format!("{}/vol1/User_Data/{}", storage_path, username);
+            let prefix = format!("{}/vol1/User/{}", storage_path, username);
             let virtual_base_dir = if save_dir.starts_with(&prefix) {
                 save_dir[prefix.len()..].to_string()
             } else {
@@ -870,7 +870,7 @@ async fn monitor_torrent_process_internal(
     if let Ok(details) = api.api_torrent_details(librqbit::api::TorrentIdOrHash::Hash(handle.info_hash())) {
          if let Some(files) = details.files {
             if !username.is_empty() {
-                let physical_base = format!("{}/vol1/User_Data/{}{}", storage_path, username, virtual_base_dir);
+                let physical_base = format!("{}/vol1/User/{}{}", storage_path, username, virtual_base_dir);
                 let base_path = Path::new(&physical_base);
                 
                 for file in files {

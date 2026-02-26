@@ -14,7 +14,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dotenvy = { workspace = true }
 once_cell = { workspace = true }
-notify = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }

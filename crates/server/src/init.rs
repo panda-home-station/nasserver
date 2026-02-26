@@ -19,7 +19,6 @@ pub async fn init() -> AppState {
     let _ = std::fs::create_dir_all(&storage_path);
     let _ = std::fs::create_dir_all(format!("{}/vol1", &storage_path));
     let _ = std::fs::create_dir_all(format!("{}/vol1/User", &storage_path));
-    let _ = std::fs::create_dir_all(format!("{}/vol1/User_Data", &storage_path));
     let _ = std::fs::create_dir_all(format!("{}/vol1/AppData", &storage_path));
 
     // Initialize database connection

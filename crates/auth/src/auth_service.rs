@@ -56,8 +56,6 @@ impl AuthService for AuthServiceImpl {
         // create per-user storage root
         let user_root = Path::new(&self.storage_path).join("vol1").join("User").join(&req.username);
         let _ = std::fs::create_dir_all(&user_root);
-        let user_data_root = Path::new(&self.storage_path).join("vol1").join("User_Data").join(&req.username);
-        let _ = std::fs::create_dir_all(&user_data_root);
 
         // Mount blob storage for the new user
         // if let Err(e) = self.blob_fs.mount_for_user(&req.username).await {

@@ -12,10 +12,8 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 uuid = { workspace = true }
 mime_guess = { workspace = true }
-sha2 = { workspace = true, features = ["asm"] }
 tracing = { workspace = true }
-hex = "0.4.3"
-opendal = { version = "0.45", features = ["services-fs", "services-s3"] }
+opendal = { version = "0.45", features = ["services-fs"] }
 chrono = { workspace = true }
 futures-util.workspace = true
 

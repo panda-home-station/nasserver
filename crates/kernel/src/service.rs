@@ -354,12 +354,6 @@ impl TerminalService {
                         let (storage_path, username) = if path.starts_with("/AppData") {
                             (path.clone(), self.current_user.clone())
                         } else if path.starts_with("/System") {
-                            // /System is owned by system/admin usually, but storage service handles mapping
-                            // We use current_user for access check?
-                            // get_file_path usage above suggests we use current_user.
-                            // But here we need to know who "owns" the file for reading?
-                            // StorageService.get_file_path uses the username to resolve User_Data
-                            // BUT for /System it ignores username and uses vol1/blobs (admin's).
                             (path.clone(), self.current_user.clone())
                         } else if path.starts_with(&format!("/User/{}", self.current_user)) {
                             let rel = path.trim_start_matches(&format!("/User/{}", self.current_user));
