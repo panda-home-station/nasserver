@@ -158,14 +158,10 @@ impl StorageServiceImpl {
                 } else {
                     format!("{}/{}", original_dir, name)
                 };
-                let display_name = if original_dir == "/" {
-                    name.clone()
-                } else {
-                    format!("{} - {}", original_dir, name)
-                };
+                // Display just the file name, original path is available in original_path
                 entries.push(DocsEntry {
                     id: row.get::<uuid::Uuid, _>("id").to_string(),
-                    name: display_name,
+                    name: name.clone(),
                     is_dir: row.get("is_dir"),
                     size: row.get("size"),
                     modified_ts: row.get::<f64, _>("ts") as i64,
