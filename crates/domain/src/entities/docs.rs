@@ -8,4 +8,6 @@ pub struct DocsEntry {
     pub size: i64,
     pub modified_ts: i64,
     pub mime: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
 }

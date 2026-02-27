@@ -153,6 +153,11 @@ impl StorageServiceImpl {
             for row in rows {
                 let name: String = row.get("name");
                 let original_dir: String = row.get("original_dir");
+                let original_path = if original_dir == "/" {
+                    format!("/{}", name)
+                } else {
+                    format!("{}/{}", original_dir, name)
+                };
                 let display_name = if original_dir == "/" {
                     name.clone()
                 } else {
@@ -165,6 +170,7 @@ impl StorageServiceImpl {
                     size: row.get("size"),
                     modified_ts: row.get::<f64, _>("ts") as i64,
                     mime: row.get("mime"),
+                    original_path: Some(original_path),
                 });
             }
             
@@ -354,9 +360,10 @@ impl StorageService for StorageServiceImpl {
             return Ok(DocsListResp {
                 path: dir,
                 entries: vec![
-                    DocsEntry { id: "sys".to_string(), name: "System".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string() },
-                    DocsEntry { id: "usr".to_string(), name: "User".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string() },
-                    DocsEntry { id: "app".to_string(), name: "AppData".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string() },
+                    DocsEntry { id: "sys".to_string(), name: "System".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string(), original_path: None },
+                    DocsEntry { id: "usr".to_string(), name: "User".to_string(), is_dir: true, size: 0, modified_ts: 0, 
+mime: "inode/directory".to_string(), original_path: None },
+                    DocsEntry { id: "app".to_string(), name: "AppData".to_string(), is_dir: true, size: 0, modified_ts: 0, mime: "inode/directory".to_string(), original_path: None },
                 ],
                 has_more: false,
                 next_offset: 0
@@ -387,6 +394,7 @@ impl StorageService for StorageServiceImpl {
                 size: 0,
                 modified_ts: 0,
                 mime: "inode/directory".to_string(),
+                original_path: None,
             }).collect();
 
             return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
@@ -432,6 +440,7 @@ impl StorageService for StorageServiceImpl {
                         size: entry.metadata().content_length() as i64,
                         modified_ts: entry.metadata().last_modified().map(|t| t.timestamp_millis()).unwrap_or(0),
                         mime: if is_dir { "inode/directory".to_string() } else { mime_guess::from_path(&name).first_or_octet_stream().to_string() },
+                        original_path: None,
                     });
                 }
             }
@@ -487,6 +496,7 @@ impl StorageService for StorageServiceImpl {
                 size: row.get("size"),
                 modified_ts: updated_at.map(|t| t.timestamp()).unwrap_or(0),
                 mime: row.get("mime"),
+                original_path: None,
             });
         }
 
@@ -608,9 +618,10 @@ impl StorageService for StorageServiceImpl {
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| DomainError::Database(e.to_string()))?;
+            let original_dir = if rel_parent.is_empty() { "/".to_string() } else { format!("/{}", rel_parent) };
             let item = sqlx::query("select id, is_dir, blob_hash from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3")
                 .bind(user_id)
-                .bind(if rel_parent.is_empty() { "/" } else { rel_parent })
+                .bind(&original_dir)
                 .bind(from_name)
                 .fetch_optional(&self.db)
                 .await
