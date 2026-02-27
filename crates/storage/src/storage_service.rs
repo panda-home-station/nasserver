@@ -136,85 +136,50 @@ impl StorageServiceImpl {
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?;
         let dir_key = if rel_dir.is_empty() { "/" } else { rel_dir };
-        // 1) Direct children (files/dirs explicitly deleted with this parent)
-        let direct_rows = sqlx::query("
-            select id, name, is_dir, size, mime, (extract(epoch from deleted_at))::float8 as ts
-            from storage.trash_items
-            where user_id = $1 and original_dir = $2
-        ")
-        .bind(user_id)
-        .bind(dir_key)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| DomainError::Database(e.to_string()))?;
-        let mut entries: Vec<DocsEntry> = Vec::new();
-        let mut existing_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for row in &direct_rows {
-            let is_dir: bool = row.get("is_dir");
-            let name: String = row.get("name");
-            let ts = row.get::<f64, _>("ts") as i64;
-            if is_dir {
-                existing_dirs.insert(name.clone());
-            }
-            entries.push(DocsEntry {
-                id: row.get::<uuid::Uuid, _>("id").to_string(),
-                name,
-                is_dir,
-                size: row.get("size"),
-                modified_ts: ts,
-                mime: row.get("mime"),
-            });
-        }
-        // 2) Virtual child directories inferred from deeper items
-        let like_pat = if dir_key == "/" { "/%".to_string() } else { format!("{}/%", dir_key) };
-        let deeper_rows = sqlx::query("
-            select original_dir, (extract(epoch from max(deleted_at)))::float8 as ts
-            from storage.trash_items
-            where user_id = $1 and original_dir like $2
-            group by original_dir
-        ")
-        .bind(user_id)
-        .bind(&like_pat)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| DomainError::Database(e.to_string()))?;
-        let mut virtual_dirs: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        for row in deeper_rows {
-            let od: String = row.get("original_dir");
-            let ts = row.get::<f64, _>("ts") as i64;
-            let rem = if dir_key == "/" {
-                od.trim_start_matches('/').to_string()
-            } else {
-                od.trim_start_matches(dir_key).trim_start_matches('/').to_string()
-            };
-            if rem.is_empty() { continue; }
-            let seg = rem.split('/').next().unwrap_or("");
-            if seg.is_empty() { continue; }
-            // Track the latest timestamp among children for display
-            let e = virtual_dirs.entry(seg.to_string()).or_insert(0);
-            if ts > *e { *e = ts; }
-        }
-        for (seg, ts) in virtual_dirs {
-            if !existing_dirs.contains(&seg) {
+        
+        // For trash root directory, show all deleted items in a flat view
+        if dir_key == "/" {
+            let rows = sqlx::query("
+                select id, name, is_dir, size, mime, original_dir, (extract(epoch from deleted_at))::float8 as ts
+                from storage.trash_items
+                where user_id = $1
+            ")
+            .bind(user_id)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| DomainError::Database(e.to_string()))?;
+            
+            let mut entries: Vec<DocsEntry> = Vec::new();
+            for row in rows {
+                let name: String = row.get("name");
+                let original_dir: String = row.get("original_dir");
+                let display_name = if original_dir == "/" {
+                    name.clone()
+                } else {
+                    format!("{} - {}", original_dir, name)
+                };
                 entries.push(DocsEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: seg,
-                    is_dir: true,
-                    size: 0,
-                    modified_ts: ts,
-                    mime: "inode/directory".to_string(),
+                    id: row.get::<uuid::Uuid, _>("id").to_string(),
+                    name: display_name,
+                    is_dir: row.get("is_dir"),
+                    size: row.get("size"),
+                    modified_ts: row.get::<f64, _>("ts") as i64,
+                    mime: row.get("mime"),
                 });
             }
+            
+            entries.sort_by(|a, b| {
+                match (a.is_dir, b.is_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                }
+            });
+            return Ok(entries);
         }
-        // Sort: directories first, then by name
-        entries.sort_by(|a, b| {
-            match (a.is_dir, b.is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            }
-        });
-        Ok(entries)
+        
+        // For subdirectories, return empty (not supported in current implementation)
+        Ok(vec![])
     }
 
     async fn delete_trash_item_recursive(&self, username: &str, rel_dir: &str, name: &str) -> Result<()> {
