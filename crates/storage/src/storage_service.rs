@@ -723,7 +723,7 @@ mime: "inode/directory".to_string(), original_path: None },
                     .await;
                 let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3 and is_dir = true")
                     .bind(user_id)
-                    .bind(if rel_parent.is_empty() { "/" } else { rel_parent })
+                    .bind(&original_dir)
                     .bind(from_name)
                     .execute(&self.db)
                     .await;
@@ -757,7 +757,7 @@ mime: "inode/directory".to_string(), original_path: None },
                 // remove item and delete blob file
                 let _ = sqlx::query("delete from storage.trash_items where user_id = $1 and original_dir = $2 and name = $3 and is_dir = false")
                     .bind(user_id)
-                    .bind(if rel_parent.is_empty() { "/" } else { rel_parent })
+                    .bind(&original_dir)
                     .bind(from_name)
                     .execute(&self.db)
                     .await;
