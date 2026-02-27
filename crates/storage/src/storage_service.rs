@@ -99,12 +99,22 @@ impl StorageServiceImpl {
 
     async fn trash_directory_recursive(&self, username: &str, full_path: &str) -> Result<()> {
         // Iterative DFS to avoid async recursion
+        let user_root = format!("/User/{}", username);
         let mut stack: Vec<String> = vec![full_path.to_string()];
         while let Some(curr) = stack.pop() {
             let p = Path::new(&curr);
             let parent = p.parent().and_then(|x| x.to_str()).unwrap_or("/");
             let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| DomainError::BadRequest("Invalid path".to_string()))?;
-            self.insert_trash_dir_item(username, parent, name).await?;
+
+            // Convert to relative path from user root for trash storage
+            let relative_parent = if parent == user_root {
+                "/".to_string()
+            } else if parent.starts_with(&user_root) {
+                parent.strip_prefix(&user_root).unwrap_or(&parent).to_string()
+            } else {
+                parent.to_string()
+            };
+            self.insert_trash_dir_item(username, &relative_parent, name).await?;
 
             let src_op = self.resolve_opendal_path(username, &curr).await?;
             let list_path = if src_op.ends_with('/') { src_op.clone() } else { format!("{}/", src_op) };
@@ -119,7 +129,13 @@ impl StorageServiceImpl {
                     } else {
                         let mime = mime_guess::from_path(&child_name).first_or_octet_stream().to_string();
                         let (hash, size) = self.hash_and_archive_file(username, &child_virtual).await?;
-                        self.upsert_trash_file_item(username, &curr, &child_name, &mime, &hash, size).await?;
+                        // Convert to relative path from user root for trash storage
+                        let relative_curr = if curr.starts_with(&user_root) {
+                            curr.strip_prefix(&user_root).unwrap_or(&curr).to_string()
+                        } else {
+                            curr.to_string()
+                        };
+                        self.upsert_trash_file_item(username, &relative_curr, &child_name, &mime, &hash, size).await?;
                     }
                 }
             }
@@ -142,7 +158,7 @@ impl StorageServiceImpl {
             let rows = sqlx::query("
                 select id, name, is_dir, size, mime, original_dir, (extract(epoch from deleted_at))::float8 as ts
                 from storage.trash_items
-                where user_id = $1
+                where user_id = $1 and original_dir = '/'
             ")
             .bind(user_id)
             .fetch_all(&self.db)
@@ -180,8 +196,49 @@ impl StorageServiceImpl {
             return Ok(entries);
         }
         
-        // For subdirectories, return empty (not supported in current implementation)
-        Ok(vec![])
+        // For subdirectories, return items that have original_dir matching the requested path
+        // rel_dir is like "/新建文件夹", we need to query trash_items where original_dir = rel_dir
+        // Ensure dir_key has leading slash for database query
+        let query_dir = if dir_key == "/" || dir_key.starts_with('/') { dir_key } else { &format!("/{}", dir_key) };
+        let rows = sqlx::query("
+            select id, name, is_dir, size, mime, original_dir, (extract(epoch from deleted_at))::float8 as ts
+            from storage.trash_items
+            where user_id = $1 and original_dir = $2
+        ")
+        .bind(user_id)
+        .bind(query_dir)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| DomainError::Database(e.to_string()))?;
+
+        let mut entries: Vec<DocsEntry> = Vec::new();
+        for row in rows {
+            let name: String = row.get("name");
+            let original_dir: String = row.get("original_dir");
+            let original_path = if original_dir == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", original_dir, name)
+            };
+            entries.push(DocsEntry {
+                id: row.get::<uuid::Uuid, _>("id").to_string(),
+                name: name.clone(),
+                is_dir: row.get("is_dir"),
+                size: row.get("size"),
+                modified_ts: row.get::<f64, _>("ts") as i64,
+                mime: row.get("mime"),
+                original_path: Some(original_path),
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            }
+        });
+        Ok(entries)
     }
 
     async fn delete_trash_item_recursive(&self, username: &str, rel_dir: &str, name: &str) -> Result<()> {
@@ -400,7 +457,16 @@ mime: "inode/directory".to_string(), original_path: None },
             // DB-driven Trash view, mirroring original_dir tree under /Trash
             let rel = dir.trim_start_matches("/Trash");
             let rel_dir = rel.trim_start_matches('/');
-            let entries = self.list_trash_dir(username, rel_dir).await?;
+            // Ensure rel_dir has leading slash for database query consistency
+            // Database stores original_dir with leading slash (e.g., "/新建文件夹")
+            let query_dir = if rel_dir.is_empty() || rel_dir == "/" {
+                "/".to_string()
+            } else if rel_dir.starts_with('/') {
+                rel_dir.to_string()
+            } else {
+                format!("/{}", rel_dir)
+            };
+            let entries = self.list_trash_dir(username, &query_dir).await?;
             return Ok(DocsListResp { path: dir, entries, has_more: false, next_offset: 0 });
         }
 
